@@ -1,0 +1,9 @@
+# Never commit credentials: .env holds the Finnhub key (and whatever else the
+# scripts sharing it need). The app also reads
+# ~/Library/Application Support/FifineDeck/widgets.json, which is outside the
+# repo by design.
+.env
+
+.build/
+FifineDeck.app/
+.DS_Store

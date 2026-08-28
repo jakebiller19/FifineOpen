@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>FifineDeck</string>
+    <key>CFBundleDisplayName</key>
+    <string>fifine Deck</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.fifinedeck</string>
+    <key>CFBundleExecutable</key>
+    <string>FifineDeck</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- The Spotify widget asks the Spotify app what is playing, over Apple
+         Events. Without this string macOS refuses the request outright rather
+         than prompting, and the widget can only ever say "no access". -->
+    <!-- The calendar widget reads your next event to draw it on a key. -->
+    <key>NSCalendarsUsageDescription</key>
+    <string>fifine Deck shows your next calendar event on a deck key.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>fifine Deck shows your next calendar event on a deck key.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>fifine Deck reads what Spotify is playing so the Spotify widget can show it on your keys.</string>
+</dict>
+</plist>
