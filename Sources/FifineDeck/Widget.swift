@@ -184,7 +184,12 @@ struct WidgetConfig: Codable, Equatable, Hashable {
         case .system:  symbols = "cpu, memory"
         case .weather: place = "London"
         case .sports:  place = "nfl"
-        case .vlc:     place = "192.168.1.10:8080"
+        // Deliberately NO default address. A plausible-looking one (there is
+        // always a 192.168.1.10 somewhere) makes a brand-new widget report
+        // "offline", which blames the network for what is really an empty
+        // field. Blank means the key says "set the address" instead, and the
+        // editor's placeholder shows the shape without pretending to be a
+        // value.
         default:       break
         }
     }

@@ -2242,3 +2242,22 @@ extension VLCWidgetTests {
         XCTAssertTrue(VLCProvider.describe(status: 500).contains("500"))
     }
 }
+
+/// A freshly-added VLC widget.
+extension VLCWidgetTests {
+
+    func testANewWidgetHasNoAddress() {
+        // Picking the kind builds a fresh config. Shipping a real-looking
+        // default address makes the first thing you see a lie about the
+        // network.
+        XCTAssertEqual(WidgetConfig(kind: .vlc).place, "")
+        XCTAssertNil(VLCProvider.address(WidgetConfig(kind: .vlc).place))
+    }
+
+    func testAnUnconfiguredWidgetSaysSoRatherThanOffline() async {
+        let snapshot = await VLCProvider().fetch(WidgetConfig(kind: .vlc), cells: 1)
+        let state = snapshot.data() as VLCState?
+        XCTAssertEqual(state?.error, "set the address")
+        XCTAssertFalse(state?.reachable ?? true, "nothing was contacted")
+    }
+}
