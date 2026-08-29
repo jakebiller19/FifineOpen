@@ -2226,3 +2226,19 @@ final class VLCWidgetTests: XCTestCase {
         XCTAssertGreaterThan(state.length, 0)
     }
 }
+
+/// VLC's HTTP failures, which are not the ones you would guess.
+extension VLCWidgetTests {
+
+    func testAnUnsetPasswordIsNamedRatherThanReportedAs404() {
+        // Measured against VLC 3: with no password it binds the port, accepts
+        // the connection, and answers 404 to everything — credentials or not.
+        // "HTTP 404" would send someone hunting for a wrong URL.
+        XCTAssertEqual(VLCProvider.describe(status: 404), "set a password in VLC")
+    }
+
+    func testTheOtherFailuresNameTheirFix() {
+        XCTAssertEqual(VLCProvider.describe(status: 401), "wrong password")
+        XCTAssertTrue(VLCProvider.describe(status: 500).contains("500"))
+    }
+}

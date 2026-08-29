@@ -142,8 +142,7 @@ actor VLCProvider: WidgetProviding {
             let (data, response) = try await URLSession.shared.data(for: Self.request(url))
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 state.reachable = true          // something answered, so VLC is up
-                state.error = http.statusCode == 401 ? "wrong password"
-                                                     : "HTTP \(http.statusCode)"
+                state.error = Self.describe(status: http.statusCode)
                 return snapshot(state)
             }
             state.reachable = true
@@ -160,6 +159,27 @@ actor VLCProvider: WidgetProviding {
             state.error = "offline"
         }
         return snapshot(state)
+    }
+
+    /// What an HTTP failure from VLC actually means.
+    ///
+    /// The 404 is the one worth knowing. With no password configured, VLC
+    /// still binds the port and still accepts connections — it just refuses
+    /// to enable the interface, and answers **404 to everything**, including
+    /// a request that carries credentials:
+    ///
+    ///     lua interface error: Password unset, insecure web interface disabled
+    ///
+    /// So "the port is open but nothing works" is not a broken URL, it is an
+    /// unset password, and reporting a bare 404 sends you looking in exactly
+    /// the wrong place. Confirmed against VLC 3 with and without one.
+    static func describe(status: Int) -> String {
+        switch status {
+        case 401: return "wrong password"
+        case 403: return "VLC refused it"
+        case 404: return "set a password in VLC"
+        default:  return "HTTP \(status)"
+        }
     }
 
     /// Reads VLC's status document. Split out and static so the parsing is
