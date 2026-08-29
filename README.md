@@ -217,12 +217,10 @@ What the key says when it cannot read the local app:
 | `connect account` | no desktop app *and* no account connected |
 | `script failed` | something else; the detail is in `NSLog` |
 
-**Your Spotify account** follows playback on *any* device — a phone, a
-speaker — and needs a one-off login. Create a free app at
-[developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), add
-`http://127.0.0.1:8888/callback` as a redirect URI, then paste its client id
-into the widget editor and press **Connect Spotify…**. The login uses PKCE, so
-no client secret is stored — only a refresh token.
+There is also an optional **account** source, for following playback on a
+phone or a speaker rather than this Mac. It needs a one-off login and is the
+only part of the Spotify widget that involves credentials at all; if you play
+music on this Mac you will never touch it. `.env.template` says what it wants.
 
 ### Clock
 
@@ -292,8 +290,8 @@ watch it.
 
 Three sources, first hit wins:
 
-1. **the environment** — `FINNHUB_KEY` (or `FINNHUN`), `SPOTIFY_CLIENT_ID`,
-   `SPOTIFY_REFRESH_TOKEN`. Persists nothing:
+1. **the environment** — `FINNHUB_KEY` (or `FINNHUN`), `FAL_KEY`. Persists
+   nothing:
 
    ```sh
    FINNHUB_KEY=… ./FifineDeck.app/Contents/MacOS/FifineDeck
@@ -328,67 +326,27 @@ because it holds no values.
 
 | Key | Needed for | Where it comes from |
 |---|---|---|
+| **none** | **Spotify, the normal way** — reads the **Spotify desktop app for macOS** running on this Mac | nothing to set up |
 | `FINNHUB_KEY` | the **Stocks** widget | [finnhub.io](https://finnhub.io), free tier |
 | `FINNHUN` | the same thing | an alias for an older `.env`; set one, not both |
-| `SPOTIFY_CLIENT_ID` | Spotify source = **your account** | the Spotify dashboard |
-| `SPOTIFY_REFRESH_TOKEN` | the same | **Connect Spotify…** writes it for you |
 | `FAL_KEY` | **generated artwork** | [fal.ai](https://fal.ai) → Dashboard → Keys |
 | `FIFINE_DECK_ENV` | pointing at a `.env` elsewhere | your shell, *not* the `.env` |
 
-Everything else runs with no credentials at all: weather (Open-Meteo), sports
-(ESPN), clock, timer, calendar, system monitor, and — the point worth
-repeating — **Spotify's default source**.
+**Spotify needs no key** — that first row is the whole story. The widget talks to the
+**Spotify desktop app for macOS** — it shells out to `osascript` and asks the
+running app what is playing (`SpotifyProvider.localNowPlaying`). One Automation
+prompt, no account, no API key, nothing to configure. `source: "auto"` finds
+the app on its own.
 
-**There is no Spotify API key, and the normal setup needs none.** The default
-source shells out to `osascript` and asks the desktop app what is playing
-(`SpotifyProvider.localNowPlaying`), which costs one Automation prompt and no
-account. `SPOTIFY_CLIENT_ID` and `SPOTIFY_REFRESH_TOKEN` belong to a *second,
-optional* source that follows playback on other devices. With neither set,
-`source: "auto"` goes straight to the local app and everything works.
+(There is an optional account login for following a phone or a speaker instead.
+It reads `SPOTIFY_CLIENT_ID` and `SPOTIFY_REFRESH_TOKEN`, both documented in
+`.env.template`, and nothing else in the app depends on them.)
+
+Everything else runs with no credentials at all: weather (Open-Meteo), sports
+(ESPN), clock, timer, calendar and system monitor.
 
 `FIFINE_DECK_ENV` is read from the environment, so putting it inside a `.env`
 does nothing: the file has to be found before it can be read.
-
-### Spotify: exactly what to set
-
-The default source, **Spotify on this Mac**, needs none of this. It asks the
-desktop app what is playing over Apple Events, so it costs one permission
-prompt and no account. Only go through the following if you want the deck to
-follow playback on **another device** — your phone, a speaker.
-
-1. [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
-   → **Create app**. Any name.
-2. **Redirect URI — this exact string:**
-
-   ```
-   http://127.0.0.1:8888/callback
-   ```
-
-   Not `localhost`. Spotify matches the redirect literally and the app's login
-   listener binds `127.0.0.1`, so the two spellings are not interchangeable —
-   a mismatch fails with `INVALID_CLIENT: Invalid redirect URI` before a login
-   page ever appears. No trailing slash.
-3. Tick **Web API**.
-4. Copy the **Client ID** into the widget editor (or `SPOTIFY_CLIENT_ID`).
-   Leave the client *secret* alone — the login is PKCE and never sends one.
-5. Press **Connect Spotify…**, approve in the browser, done. The refresh token
-   is written to `widgets.json` at mode `0600`.
-
-Port 8888 has to be free while step 5 runs, and only while it runs. The scopes
-requested are `user-read-playback-state` and `user-modify-playback-state` — the
-second is what lets a transport key actually skip a track. If you log in with
-an account other than the one that created the app, add it under the app's
-**User Management**, because a Development-mode app only admits accounts listed
-there.
-
-Setting `SPOTIFY_REFRESH_TOKEN` in a `.env` by hand works — moving a going
-setup to another Mac is the reason to — but it will not stay authoritative:
-Spotify rotates refresh tokens, and the app saves the rotated one to
-`widgets.json`, which then outranks the file. Treat that line as a way in
-rather than as the store.
-
-The web source needs **both** values. With only one of them the key says
-`not logged in`.
 
 ## Generated artwork
 
