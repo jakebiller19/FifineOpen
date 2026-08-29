@@ -24,6 +24,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     case sports
     case timer
     case calendar
+    case vlc
 
     var id: String { rawValue }
 
@@ -37,6 +38,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return "Sports scores"
         case .timer:    return "Timer"
         case .calendar: return "Next calendar event"
+        case .vlc:      return "VLC on the network"
         }
     }
 
@@ -52,13 +54,17 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return ["auto", "score", "compact"]
         case .timer:    return ["auto", "ring", "digits"]
         case .calendar: return ["auto", "next", "agenda"]
+        case .vlc:      return ["auto", "progress", "text", "button", "controls"]
         }
     }
 
     /// Styles that ignore `press` because they define their own per-key
     /// actions. A "controls" widget IS the transport bar.
     var stylesWithOwnActions: [String] {
-        self == .spotify ? ["controls"] : []
+        switch self {
+        case .spotify, .vlc: return ["controls"]
+        default:             return []
+        }
     }
 
     var presses: [String] {
@@ -71,6 +77,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return ["cycle", "none"]
         case .timer:    return ["start_pause", "reset", "none"]
         case .calendar: return ["open", "none"]
+        case .vlc:      return ["play_pause", "next", "previous", "stop", "none"]
         }
     }
 
@@ -86,6 +93,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return 60
         case .timer:    return 1
         case .calendar: return 60
+        case .vlc:      return 2
         }
     }
 
@@ -103,6 +111,8 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return 20
         case .timer:    return 1
         case .calendar: return 15
+        // A machine on your own LAN, answering a tiny JSON document.
+        case .vlc:      return 1
         }
     }
 
@@ -117,7 +127,10 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     /// Kinds with a single free-text target: a city, a league.
     var usesPlace: Bool {
         switch self {
-        case .weather, .sports: return true
+        // VLC reuses `place` for the address of the machine running it: it is
+        // the same thing the field already is - one free-text target - and a
+        // field per kind would be a field per kind.
+        case .weather, .sports, .vlc: return true
         default: return false
         }
     }
@@ -127,7 +140,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     var isLocal: Bool {
         switch self {
         case .clock, .system, .timer, .calendar: return true
-        case .spotify, .stocks, .weather, .sports: return false
+        case .spotify, .stocks, .weather, .sports, .vlc: return false
         }
     }
 }
@@ -171,6 +184,7 @@ struct WidgetConfig: Codable, Equatable, Hashable {
         case .system:  symbols = "cpu, memory"
         case .weather: place = "London"
         case .sports:  place = "nfl"
+        case .vlc:     place = "192.168.1.10:8080"
         default:       break
         }
     }
@@ -393,6 +407,7 @@ enum WidgetRegistry {
         .sports: SportsProvider(),
         .timer: TimerProvider(),
         .calendar: CalendarProvider(),
+        .vlc: VLCProvider(),
     ]
 
     static func provider(for kind: WidgetKind) -> any WidgetProviding {

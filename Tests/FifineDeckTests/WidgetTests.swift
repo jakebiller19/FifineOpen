@@ -2055,3 +2055,174 @@ final class RepositoryHygieneTests: XCTestCase {
         }
     }
 }
+
+/// The VLC widget: address parsing, VLC's status document, and the transport.
+///
+/// Everything here is pure except the last test, which talks to a real VLC.
+final class VLCWidgetTests: XCTestCase {
+
+    // MARK: Address
+
+    func testAPlainHostGetsVLCsDefaultPort() {
+        let address = VLCProvider.address("192.168.1.10")
+        XCTAssertEqual(address?.host, "192.168.1.10")
+        XCTAssertEqual(address?.port, 8080)
+    }
+
+    func testAPortIsHonoured() {
+        XCTAssertEqual(VLCProvider.address("nas.local:9090")?.port, 9090)
+        XCTAssertEqual(VLCProvider.address("nas.local:9090")?.host, "nas.local")
+    }
+
+    func testAPastedURLWorks() {
+        // People paste what they typed into a browser to check it.
+        let address = VLCProvider.address("http://192.168.1.10:8080/")
+        XCTAssertEqual(address?.host, "192.168.1.10")
+        XCTAssertEqual(address?.port, 8080)
+    }
+
+    func testNothingUsableIsRejected() {
+        XCTAssertNil(VLCProvider.address(""))
+        XCTAssertNil(VLCProvider.address("   "))
+        XCTAssertNil(VLCProvider.address("http://"))
+    }
+
+    func testAHostnameWithNoPortIsNotMistakenForOne() {
+        // "media-pc" has no colon; the last-colon split must not eat the host.
+        XCTAssertEqual(VLCProvider.address("media-pc")?.host, "media-pc")
+        XCTAssertEqual(VLCProvider.address("media-pc:notaport")?.host, "media-pc:notaport")
+    }
+
+    // MARK: The status document
+
+    /// Captured from a real VLC 3 (`apiversion: 3`).
+    private func status(state: String = "playing", meta: [String: Any] = [:]) -> [String: Any] {
+        ["state": state, "time": 7, "length": 20, "volume": 256, "position": 0.365,
+         "information": ["category": ["meta": meta]]]
+    }
+
+    func testPlayingIsRead() {
+        var vlc = VLCState()
+        VLCProvider.apply(status(), to: &vlc)
+        XCTAssertTrue(vlc.playing)
+        XCTAssertFalse(vlc.stopped)
+        XCTAssertEqual(vlc.time, 7)
+        XCTAssertEqual(vlc.length, 20)
+        XCTAssertEqual(vlc.position, 0.365, accuracy: 0.001)
+    }
+
+    func testPausedIsNotPlayingAndNotStopped() {
+        var vlc = VLCState()
+        VLCProvider.apply(status(state: "paused"), to: &vlc)
+        XCTAssertFalse(vlc.playing)
+        XCTAssertFalse(vlc.stopped)
+    }
+
+    func testTheFilenameIsTheFallbackTitle() {
+        // What VLC actually gives you for a file off a disk: a filename and
+        // nothing else. Verified against a real VLC.
+        var vlc = VLCState()
+        VLCProvider.apply(status(meta: ["filename": "Deep Blue Test Track.wav"]), to: &vlc)
+        XCTAssertEqual(vlc.displayTitle, "Deep Blue Test Track")
+        XCTAssertTrue(vlc.hasTrack)
+    }
+
+    func testRealMetadataBeatsTheFilename() {
+        var vlc = VLCState()
+        VLCProvider.apply(status(meta: ["filename": "01.mp3", "title": "Teardrop",
+                                        "artist": "Massive Attack", "album": "Mezzanine"]),
+                          to: &vlc)
+        XCTAssertEqual(vlc.displayTitle, "Teardrop")
+        XCTAssertEqual(vlc.artist, "Massive Attack")
+    }
+
+    func testARadioStreamPutsTheTrackFirst() {
+        // Streams carry the station in `title` and the song in `now_playing`,
+        // which is the wrong way round for a key.
+        var vlc = VLCState()
+        VLCProvider.apply(status(meta: ["title": "BBC Radio 6", "now_playing": "Song — Band"]),
+                          to: &vlc)
+        XCTAssertEqual(vlc.displayTitle, "Song — Band")
+        XCTAssertEqual(vlc.artist, "BBC Radio 6")
+    }
+
+    func testAStreamOfUnknownLengthDoesNotDivideByZero() {
+        var vlc = VLCState()
+        VLCProvider.apply(["state": "playing", "time": 30, "length": 0], to: &vlc)
+        XCTAssertEqual(vlc.position, 0)
+        XCTAssertEqual(vlc.time, 30)
+    }
+
+    func testAnEmptyDocumentIsHandled() {
+        var vlc = VLCState()
+        VLCProvider.apply([:], to: &vlc)
+        XCTAssertTrue(vlc.stopped)
+        XCTAssertFalse(vlc.hasTrack)
+    }
+
+    // MARK: Transport
+
+    func testPlayPauseTogglesTheRightWay() {
+        // pl_pause toggles, but from a stop there is nothing loaded to
+        // toggle - pl_play is what starts the playlist.
+        XCTAssertEqual(VLCProvider.command(for: "play_pause", playing: true), "pl_pause")
+        XCTAssertEqual(VLCProvider.command(for: "play_pause", playing: false), "pl_play")
+        XCTAssertEqual(VLCProvider.command(for: "next", playing: true), "pl_next")
+        XCTAssertEqual(VLCProvider.command(for: "previous", playing: true), "pl_previous")
+        XCTAssertEqual(VLCProvider.command(for: "stop", playing: true), "pl_stop")
+        XCTAssertNil(VLCProvider.command(for: "none", playing: true))
+    }
+
+    func testATransportBarGivesEachKeyItsOwnButton() {
+        let actions = (0..<3).map { VLCProvider.transportAction(dx: $0, columns: 3) }
+        XCTAssertEqual(actions, ["previous", "play_pause", "next"])
+    }
+
+    func testKeysSharingAButtonRepeatItRatherThanSplittingIt() {
+        // The deck's keys are physically separate; half a pause symbol across
+        // a gap reads as a fault.
+        let actions = (0..<6).map { VLCProvider.transportAction(dx: $0, columns: 6) }
+        XCTAssertEqual(actions, ["previous", "previous", "play_pause",
+                                 "play_pause", "next", "next"])
+    }
+
+    func testTheGlyphAndTheActionCannotDisagree() {
+        XCTAssertEqual(VLCProvider.glyphName(for: "play_pause", playing: true), "pause.fill")
+        XCTAssertEqual(VLCProvider.glyphName(for: "play_pause", playing: false), "play.fill")
+        XCTAssertEqual(VLCProvider.glyphName(for: "next", playing: true), "forward.end.fill")
+    }
+
+    func testAutoPicksALayoutThatFitsTheSpan() {
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 1, rows: 1), "button")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 1), "controls")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 2), "progress")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("text", columns: 1, rows: 1), "text")
+    }
+
+    func testTheClockReadsLikeAClock() {
+        XCTAssertEqual(VLCState.clock(0), "0:00")
+        XCTAssertEqual(VLCState.clock(7), "0:07")
+        XCTAssertEqual(VLCState.clock(125), "2:05")
+        XCTAssertEqual(VLCState.clock(3725), "1:02:05")
+    }
+
+    // MARK: Against a real VLC
+
+    /// Off by default: it needs a VLC running with its web interface on.
+    ///
+    ///     VLC_TEST_HOST=127.0.0.1:8099 VLC_PASSWORD=… swift test --filter testAgainstARealVLC
+    func testAgainstARealVLC() async throws {
+        let host = ProcessInfo.processInfo.environment["VLC_TEST_HOST"] ?? ""
+        try XCTSkipIf(host.isEmpty, "live test: set VLC_TEST_HOST and VLC_PASSWORD")
+        try XCTSkipUnless(WidgetCredentials.has(.vlcPassword), "no VLC_PASSWORD in the environment")
+
+        var config = WidgetConfig(kind: .vlc)
+        config.place = host
+        let snapshot = await VLCProvider().fetch(config, cells: 6)
+        let state = try XCTUnwrap(snapshot.data() as VLCState?)
+        XCTAssertTrue(state.reachable, "nothing answered at \(host)")
+        XCTAssertTrue(state.ok, "VLC answered but the reply did not parse: \(state.error)")
+        XCTAssertTrue(state.hasTrack, "expected something playing")
+        XCTAssertGreaterThan(state.length, 0)
+    }
+}

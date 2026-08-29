@@ -13,12 +13,14 @@ struct WidgetEditor: View {
 
     private enum Field: Hashable {
         case symbols, interval, rotate, finnhub, clientID, place, timezone, minutes
+        case vlcPassword
     }
 
     @State private var symbols = ""
     @State private var interval = ""
     @State private var rotate = ""
     @State private var place = ""
+    @State private var vlcPassword = ""
     @State private var timezone = ""
     @State private var minutes = ""
     @State private var finnhubKey = ""
@@ -135,6 +137,12 @@ struct WidgetEditor: View {
             options = [("Scoreboard", preset(.sports, style: "score", 3, 1)),
                        ("One game", preset(.sports, style: "score", 1, 1)),
                        ("Block", preset(.sports, style: "score", 3, 2))]
+        case .vlc:
+            options = [("Now playing", preset(.vlc, style: "progress", 3, 2)),
+                       ("Transport bar", preset(.vlc, style: "controls", 3, 1)),
+                       ("Play/pause key", preset(.vlc, style: "button", 1, 1,
+                                                 press: "play_pause")),
+                       ("Next key", preset(.vlc, style: "button", 1, 1, press: "next"))]
         case .timer:
             options = [("Pomodoro 25", preset(.timer, style: "ring", 2, 2, minutes: 25)),
                        ("5 minutes", preset(.timer, style: "digits", 1, 1, minutes: 5)),
@@ -220,6 +228,7 @@ struct WidgetEditor: View {
         case .sports:   sportsFields(config)
         case .timer:    timerFields(config)
         case .calendar: intervalField(config)
+        case .vlc:      vlcFields(config)
         }
     }
 
@@ -263,6 +272,51 @@ struct WidgetEditor: View {
             }
             Text("Open-Meteo — free, no account needed.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
+            intervalField(config)
+        }
+    }
+
+    /// VLC's address, and the password its web interface wants.
+    ///
+    /// The address is ordinary configuration and lives in `settings.json`
+    /// with the rest of the layout. The password does NOT: it goes through
+    /// the credential store like every other secret, because settings.json is
+    /// the file you copy to another machine.
+    private func vlcFields(_ config: WidgetConfig) -> some View {
+        let source = WidgetCredentials.source(.vlcPassword)
+        return VStack(alignment: .leading, spacing: 10) {
+            labelled("Address of the machine running VLC") {
+                TextField("192.168.1.10:8080", text: $place)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focus, equals: .place)
+                    .onSubmit { commit(\.place, place) }
+                    .onChange(of: focus) { if $0 != .place { commit(\.place, place) } }
+            }
+            labelled("Web interface password") {
+                HStack(spacing: 6) {
+                    SecureField(source == .missing ? "the Lua password you set in VLC"
+                                                   : "replace it",
+                                text: $vlcPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focus, equals: .vlcPassword)
+                        .onSubmit { saveVLCPassword() }
+                    Button("Save") { saveVLCPassword() }
+                        .controlSize(.small).disabled(vlcPassword.isEmpty)
+                }
+            }
+            if source == .missing {
+                Label("Not set — the widget cannot connect without it",
+                      systemImage: "exclamationmark.circle")
+                    .font(.system(size: 10)).foregroundStyle(.orange)
+            } else {
+                Label(source.label, systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 10)).foregroundStyle(.green)
+            }
+            Text("In VLC: Preferences → Show settings **All** → Interface → "
+                 + "Main interfaces → tick **Web**, then Lua → set a password. "
+                 + "Restart VLC, and let it through that machine's firewall on port 8080.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             intervalField(config)
         }
     }
@@ -551,6 +605,15 @@ struct WidgetEditor: View {
         config.rotate = value
         deck.setWidget(config, for: index)
         rotate = trim(config.normalized.rotate)
+    }
+
+    private func saveVLCPassword() {
+        let password = vlcPassword.trimmingCharacters(in: .whitespaces)
+        guard !password.isEmpty else { return }
+        WidgetCredentials.set(.vlcPassword, password)
+        vlcPassword = ""
+        focus = nil
+        reloadCredentials()
     }
 
     private func saveFinnhub() {

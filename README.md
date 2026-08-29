@@ -222,6 +222,43 @@ phone or a speaker rather than this Mac. It needs a one-off login and is the
 only part of the Spotify widget that involves credentials at all; if you play
 music on this Mac you will never touch it. `.env.template` says what it wants.
 
+### VLC on the network
+
+What another machine's VLC is playing, and the transport to drive it — a
+Windows box, a media PC, a Mac in another room.
+
+| Setting | What it does |
+|---|---|
+| Address | `192.168.1.10`, `media-pc:8080`, or a pasted `http://…` URL |
+| Password | VLC's web-interface password — stored as a credential, never in `settings.json` |
+| Layout | `Automatic`, or force one of: progress · text · one button · transport bar |
+| On press | play/pause, next, previous, stop, or nothing |
+
+`Automatic` gives a single key the play/pause button, a wide 1-row span the
+transport bar (each key its own control), and anything larger the title,
+artist and a progress bar.
+
+**Turn VLC's web interface on first** — it is off by default. On the machine
+running VLC: Preferences → *Show settings **All*** → Interface → Main
+interfaces → tick **Web**, then Main interfaces → **Lua** → set a password.
+Restart VLC, and allow port 8080 through that machine's firewall. Put the
+password in `VLC_PASSWORD` (or the widget editor); the address goes in the
+widget, since only the password is a secret.
+
+No agent to install on the other machine and no protocol to reverse: VLC's own
+HTTP server answers `/requests/status.json` and takes `?command=pl_pause` on
+the same URL. Its auth is HTTP Basic with an **empty user name** — sending one
+is the usual reason a correct password still gets a 401.
+
+VLC often reports no metadata at all: a file played off a disk gives a
+filename and nothing else, so the filename (minus its extension) is the
+fallback title. Radio streams are the other way round — the station is in
+`title` and the song in `now_playing` — so those are swapped back.
+
+What the key says when it cannot connect: `offline` (nothing answered — the
+machine is asleep, VLC is closed, the interface was never enabled, or a
+firewall ate it), `wrong password`, `no password`, `set the address`.
+
 ### Clock
 
 Digital, analog or a date face; `Automatic` picks the analog face for a square
@@ -330,6 +367,7 @@ because it holds no values.
 | `FINNHUB_KEY` | the **Stocks** widget | [finnhub.io](https://finnhub.io), free tier |
 | `FINNHUN` | the same thing | an alias for an older `.env`; set one, not both |
 | `FAL_KEY` | **generated artwork** | [fal.ai](https://fal.ai) → Dashboard → Keys |
+| `VLC_PASSWORD` | the **VLC on the network** widget | the password you set in VLC's web interface |
 | `FIFINE_DECK_ENV` | pointing at a `.env` elsewhere | your shell, *not* the `.env` |
 
 **Spotify needs no key** — that first row is the whole story. The widget talks to the
@@ -541,6 +579,7 @@ Sources/FifineDeck/
   WidgetCredentials.swift  API keys and tokens (env / widgets.json / .env)
   SpotifyWidget.swift   now-playing data (Apple Events / Web API) + faces
   SpotifyAuth.swift     one-off PKCE login on a loopback listener
+  VLCWidget.swift       another machine's VLC, over its HTTP interface
   StocksWidget.swift    Finnhub quotes + ticker faces
 Tests/FifineDeckTests/  span layout, config validation, rendering
 Tools/make_icon.swift   draws the app icon -> Resources/AppIcon.icns
@@ -658,6 +697,7 @@ Nothing until you add a widget that needs it, and nothing about you:
 | `i.scdn.co` | album art for the Spotify widget |
 | `api.open-meteo.com` | a Weather widget — the place or coordinates |
 | `site.api.espn.com` | a Sports widget — the league |
+| your own LAN | a VLC widget — only the address you typed, never off your network |
 | `127.0.0.1:8888` | the one-off Spotify login, on the loopback only |
 
 There is no analytics, no crash reporting and no update check. The Spotify

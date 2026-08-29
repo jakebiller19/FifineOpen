@@ -21,6 +21,7 @@ enum WidgetCredentials {
         case spotifyClientID = "spotify_client_id"
         case spotifyRefreshToken = "spotify_refresh_token"
         case fal = "fal_key"
+        case vlcPassword = "vlc_password"
 
         /// Names accepted in the environment and in a `.env`, in order.
         /// `FINNHUN` is the spelling in an existing `.env` of this user's, kept
@@ -31,6 +32,7 @@ enum WidgetCredentials {
             case .spotifyClientID:     return ["SPOTIFY_CLIENT_ID"]
             case .spotifyRefreshToken: return ["SPOTIFY_REFRESH_TOKEN"]
             case .fal:                 return ["FAL_KEY"]
+            case .vlcPassword:         return ["VLC_PASSWORD"]
             }
         }
 
@@ -40,6 +42,7 @@ enum WidgetCredentials {
             case .spotifyClientID:     return "Spotify client id"
             case .spotifyRefreshToken: return "Spotify refresh token"
             case .fal:                 return "fal.ai API key"
+            case .vlcPassword:         return "VLC web interface password"
             }
         }
     }
