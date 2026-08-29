@@ -425,6 +425,11 @@ enum WidgetError: Error {
 
 // MARK: - Rendering
 
+/// Every now-playing face there is, for every player.
+///
+/// Named for Spotify because it was written for it; it now draws VLC too,
+/// from the same `NowPlayingFace`. That is the point — one set of `auto`
+/// rules, one split panel, one progress block.
 enum SpotifyWidgetRenderer {
     /// Which layout a span gets when the style is "auto".
     ///
@@ -473,7 +478,7 @@ enum SpotifyWidgetRenderer {
                                    buttons: buttons.count)]
     }
 
-    static func draw(_ state: SpotifyNowPlaying, config: WidgetConfig,
+    static func draw(_ state: NowPlayingFace, config: WidgetConfig,
                      columns: Int, rows: Int, background: NSColor,
                      ctx: CGContext) {
         let cell = CGFloat(DeckLayout.keyPixels)
@@ -485,17 +490,17 @@ enum SpotifyWidgetRenderer {
             // No error text means nothing has been fetched yet — a fresh
             // widget, or one whose configuration just changed. Saying
             // "unavailable" there would accuse the service of being down.
-            WidgetPaint.message("Spotify", state.error.isEmpty ? "connecting…" : state.error,
-                                frame: frame, ctx: ctx, tint: WidgetPaint.green)
+            WidgetPaint.message(state.brand, state.error.isEmpty ? "connecting…" : state.error,
+                                frame: frame, ctx: ctx, tint: state.brandTint)
             return
         }
         guard state.hasTrack else {
-            WidgetPaint.message("Spotify", "nothing playing", frame: frame, ctx: ctx,
-                                tint: WidgetPaint.green)
+            WidgetPaint.message(state.brand, "nothing playing", frame: frame, ctx: ctx,
+                                tint: state.brandTint)
             return
         }
 
-        let accent = state.art != nil ? state.accent : WidgetPaint.green
+        let accent = state.art != nil ? state.accent : state.brandTint
         let resolved = style(for: config, columns: columns, rows: rows)
         switch resolved {
         case "text":
@@ -529,7 +534,7 @@ enum SpotifyWidgetRenderer {
 
     /// The corner badge: what pressing this key does, and — through its tint —
     /// whether playback is live.
-    private static func badge(_ state: SpotifyNowPlaying, config: WidgetConfig,
+    private static func badge(_ state: NowPlayingFace, config: WidgetConfig,
                               frame: CGRect, cell: CGFloat, accent: NSColor,
                               ctx: CGContext) {
         // Playing accents the badge, paused greys it, so the state survives
@@ -561,7 +566,7 @@ enum SpotifyWidgetRenderer {
 
     // MARK: Layouts
 
-    private static func drawText(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawText(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                  accent: NSColor, background: NSColor,
                                  foreground: NSColor, ctx: CGContext) {
         let tint = WidgetPaint.mix(background, accent, 0.22)
@@ -582,7 +587,7 @@ enum SpotifyWidgetRenderer {
         }
     }
 
-    private static func drawArt(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawArt(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                 accent: NSColor, background: NSColor, foreground: NSColor,
                                 withCaption: Bool, ctx: CGContext) {
         guard let art = state.art else {
@@ -613,7 +618,7 @@ enum SpotifyWidgetRenderer {
 
     /// Art in a square block on the left, text beside it — the layout for a
     /// wide, short span (2x1, 3x1, 5x1).
-    private static func drawArtText(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawArtText(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                     accent: NSColor, background: NSColor,
                                     foreground: NSColor, ctx: CGContext) {
         let artWidth = frame.width > frame.height ? min(frame.height, frame.width / 2) : frame.width
@@ -668,7 +673,7 @@ enum SpotifyWidgetRenderer {
     /// aspect, and everything else gets the panel: title, artist, album, a
     /// progress bar and the times, all sized off the PANEL rather than off one
     /// key, so a bigger widget genuinely reads bigger.
-    private static func drawSplit(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawSplit(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                   accent: NSColor, background: NSColor,
                                   foreground: NSColor, ctx: CGContext) {
         // A square of whole keys, as tall as the widget allows, always leaving
@@ -729,7 +734,7 @@ enum SpotifyWidgetRenderer {
 
     /// One big transport button filling the span — a control that is a key in
     /// its own right rather than a corner badge on a now-playing face.
-    private static func drawButton(_ state: SpotifyNowPlaying, config: WidgetConfig,
+    private static func drawButton(_ state: NowPlayingFace, config: WidgetConfig,
                                    frame: CGRect, cell: CGFloat, accent: NSColor,
                                    background: NSColor, ctx: CGContext) {
         let action = config.press == "none" ? "play_pause" : config.press
@@ -747,7 +752,7 @@ enum SpotifyWidgetRenderer {
 
     /// A transport bar across the span: previous / play-pause / next, each
     /// button claiming whole keys, each key pressing only its own button.
-    private static func drawControls(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawControls(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                      columns: Int, rows: Int, accent: NSColor,
                                      background: NSColor, ctx: CGContext) {
         let buttons = controlButtons(cellCount: columns * rows)
@@ -775,7 +780,7 @@ enum SpotifyWidgetRenderer {
     /// One transport button: a big glyph on a tinted face. Playing tints it
     /// with the album accent, paused greys it, so a bar of buttons still says
     /// whether anything is playing.
-    private static func drawControlFace(_ action: String, state: SpotifyNowPlaying,
+    private static func drawControlFace(_ action: String, state: NowPlayingFace,
                                         rect: CGRect, cell: CGFloat, accent: NSColor,
                                         background: NSColor, label: Bool,
                                         glyphRect: CGRect? = nil, ctx: CGContext) {
@@ -809,7 +814,7 @@ enum SpotifyWidgetRenderer {
 
     /// Art as a dimmed background with the track and a progress bar over it —
     /// the layout for a block span (2x2 and larger).
-    private static func drawProgress(_ state: SpotifyNowPlaying, frame: CGRect, cell: CGFloat,
+    private static func drawProgress(_ state: NowPlayingFace, frame: CGRect, cell: CGFloat,
                                      accent: NSColor, background: NSColor, ctx: CGContext) {
         if let art = state.art {
             WidgetPaint.drawCover(art, in: frame, ctx: ctx)
@@ -835,7 +840,7 @@ enum SpotifyWidgetRenderer {
                          color: NSColor(white: 0.86, alpha: 1), shadow: true)
     }
 
-    private static func progress(_ state: SpotifyNowPlaying, x: CGFloat, y: CGFloat,
+    private static func progress(_ state: NowPlayingFace, x: CGFloat, y: CGFloat,
                                  width: CGFloat, height: CGFloat, cell: CGFloat,
                                  accent: NSColor, track: NSColor, labels: Bool,
                                  bottom: CGFloat, ctx: CGContext,
@@ -897,8 +902,8 @@ extension SpotifyProvider: WidgetProviding {
     @MainActor
     func draw(_ snapshot: WidgetSnapshot, config: WidgetConfig,
                           columns: Int, rows: Int, background: NSColor, ctx: CGContext) {
-        SpotifyWidgetRenderer.draw(snapshot.data(SpotifyNowPlaying.self) ?? SpotifyNowPlaying(),
-                                   config: config, columns: columns, rows: rows,
-                                   background: background, ctx: ctx)
+        let state = snapshot.data(SpotifyNowPlaying.self) ?? SpotifyNowPlaying()
+        SpotifyWidgetRenderer.draw(state.face, config: config, columns: columns,
+                                   rows: rows, background: background, ctx: ctx)
     }
 }

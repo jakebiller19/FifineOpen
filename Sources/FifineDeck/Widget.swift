@@ -56,9 +56,10 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return ["auto", "score", "compact"]
         case .timer:    return ["auto", "ring", "digits"]
         case .calendar: return ["auto", "next", "agenda"]
-        case .vlc:      return ["auto", "art", "split", "progress", "text", "button", "controls"]
+        // The same list Spotify offers: one renderer draws both.
+        case .vlc:      return ["auto", "art", "art+text", "split", "progress", "text", "button", "controls"]
         // The styles BOTH renderers understand, since either may draw.
-        case .nowPlaying: return ["auto", "art", "split", "text", "button", "controls"]
+        case .nowPlaying: return ["auto", "art", "art+text", "split", "progress", "text", "button", "controls"]
         }
     }
 

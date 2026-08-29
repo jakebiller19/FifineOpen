@@ -2192,18 +2192,25 @@ final class VLCWidgetTests: XCTestCase {
         XCTAssertEqual(VLCProvider.glyphName(for: "next", playing: true), "forward.end.fill")
     }
 
-    func testAutoPicksALayoutThatFitsTheSpan() {
-        // One key is a control: a single glyph is all that reads at 100 px.
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 1, rows: 1), "button")
-        // A wide single row is the transport bar.
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 1), "controls")
-        // Wide AND tall has room for square cover art beside a text panel.
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 2), "split")
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 4, rows: 2), "split")
-        // Too narrow to split: text and a progress bar instead.
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 2, rows: 2), "progress")
-        // An explicit choice is never overridden.
+    func testVLCAndSpotifyAlwaysPickTheSameLayout() {
+        // The bug this replaces a hardcoded table for: each renderer had its
+        // own `auto` rules, so a 3x2 VLC widget looked nothing like a 3x2
+        // Spotify one. Asserting they AGREE cannot go stale the way a list of
+        // expected strings can.
+        for columns in 1...5 {
+            for rows in 1...3 {
+                var spotify = WidgetConfig(kind: .spotify); spotify.style = "auto"
+                let expected = SpotifyWidgetRenderer.style(for: spotify,
+                                                           columns: columns, rows: rows)
+                XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: columns, rows: rows),
+                               expected, "\(columns)x\(rows) disagrees")
+            }
+        }
+    }
+
+    func testAnExplicitStyleIsNeverOverridden() {
         XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("text", columns: 1, rows: 1), "text")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("controls", columns: 3, rows: 1), "controls")
         XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("art", columns: 3, rows: 2), "art")
     }
 
@@ -2367,17 +2374,36 @@ final class NowPlayingTests: XCTestCase {
 /// The progress block is shared, not imitated.
 extension VLCWidgetTests {
 
-    func testEveryNowPlayingFaceDrawsTheSameBar() throws {
-        // The bar, its two timestamps and their geometry live in one function
-        // that Spotify's faces and VLC's faces both call. Imitating it in two
-        // places is how a deck ends up looking assembled from two apps.
+    func testVLCDrawsNothingOfItsOwn() throws {
+        // There is ONE now-playing renderer. VLC contributes a
+        // `NowPlayingFace` and no pixels — the moment it starts drawing again
+        // the two can diverge, which is exactly what this replaced.
         let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources/FifineDeck/VLCWidget.swift"), encoding: .utf8)
-        XCTAssertTrue(source.contains("WidgetPaint.progressBlock"),
-                      "VLC should draw the shared block")
-        XCTAssertFalse(source.contains("WidgetPaint.progressBar("),
-                       "a face drawing its own bar has stopped sharing")
+        for call in ["WidgetPaint.progressBar(", "WidgetPaint.progressBlock(",
+                     "WidgetPaint.drawCover(", "WidgetPaint.line(", "WidgetPaint.glyph("] {
+            XCTAssertFalse(source.contains(call),
+                           "VLCWidget.swift calls \(call) — it has grown its own face again")
+        }
+        XCTAssertTrue(source.contains("SpotifyWidgetRenderer.draw"))
+    }
+
+    func testBothPlayersProduceTheSameKindOfFace() {
+        // The conversion both sides go through, so the renderer cannot tell
+        // them apart except by the brand on the "cannot reach it" message.
+        var spotify = SpotifyNowPlaying()
+        spotify.ok = true; spotify.title = "T"; spotify.artist = "A"
+        spotify.progressMS = 30_000; spotify.durationMS = 60_000
+        var vlc = VLCState()
+        vlc.ok = true; vlc.title = "T"; vlc.artist = "A"
+        vlc.time = 30; vlc.length = 60      // VLC counts in SECONDS
+
+        XCTAssertEqual(spotify.face.progressMS, vlc.face.progressMS)
+        XCTAssertEqual(spotify.face.durationMS, vlc.face.durationMS)
+        XCTAssertEqual(spotify.face.title, vlc.face.title)
+        XCTAssertEqual(spotify.face.brand, "Spotify")
+        XCTAssertEqual(vlc.face.brand, "VLC")
     }
 }

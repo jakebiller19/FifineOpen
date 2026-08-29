@@ -293,17 +293,15 @@ actor VLCProvider: WidgetProviding {
     /// same reason: the deck's keys are physically separate, so one glyph
     /// stretched across a gap reads as a fault.
     nonisolated func action(for config: WidgetConfig, cell: WidgetCell) -> String {
-        guard config.style == "controls" else { return config.press }
-        return Self.transportAction(dx: cell.dx, columns: cell.columns)
+        SpotifyWidgetRenderer.pressAction(config: config, cell: cell)
     }
 
     /// The button at a given column of a transport bar. One function, used by
     /// both the press and the glyph, so the two cannot disagree.
     static func transportAction(dx: Int, columns: Int) -> String {
-        let buttons = ["previous", "play_pause", "next"]
-        guard columns > 0 else { return "play_pause" }
-        let slot = (Double(dx) + 0.5) / Double(columns) * Double(buttons.count)
-        return buttons[min(max(Int(slot), 0), buttons.count - 1)]
+        let buttons = SpotifyWidgetRenderer.controlButtons(cellCount: columns)
+        return buttons[SpotifyWidgetRenderer.buttonIndex(dx: dx, columns: columns,
+                                                         buttons: buttons.count)]
     }
 
     func press(_ config: WidgetConfig, cell: WidgetCell, snapshot: WidgetSnapshot) async -> Bool {
@@ -355,267 +353,24 @@ actor VLCProvider: WidgetProviding {
 
 // MARK: - Faces
 
+/// VLC has no faces of its own any more.
+///
+/// It draws through `SpotifyWidgetRenderer`, from the shared `NowPlayingFace`.
+/// Two renderers meant two sets of `auto` rules, and a 3x2 VLC widget looked
+/// nothing like a 3x2 Spotify one — not because either was wrong, but because
+/// nothing made them agree. This is what makes them agree.
 enum VLCWidgetRenderer {
-    /// Which layout a span gets when the style is "auto": a single key can
-    /// only be a button, a wide short block is a transport bar, anything
-    /// bigger has room for text and a progress bar.
+    /// Kept as the name the tests reason about; the rules are Spotify's.
     static func resolvedStyle(_ style: String, columns: Int, rows: Int) -> String {
-        guard style == "auto" else { return style }
-        // A single key is a control - one glyph is all that reads at 100px.
-        if columns == 1 && rows == 1 { return "button" }
-        // A wide single row is a transport bar: each key its own button.
-        if rows == 1 && columns >= 3 { return "controls" }
-        // Wide and tall enough for a square of art beside a panel of text.
-        if columns >= 3 && rows >= 2 { return "split" }
-        return "progress"
-    }
-
-    /// Cover art behind the whole face, dimmed enough for text to sit on it.
-    @MainActor
-    private static func drawArtBackground(_ state: VLCState, frame: CGRect, ctx: CGContext) {
-        guard let art = state.art else { return }
-        WidgetPaint.drawCover(art, in: frame, ctx: ctx)
-        // Without a scrim, a title lands on whatever the cover happens to be
-        // and half of them are white.
-        WidgetPaint.scrim(frame, ctx: ctx)
+        var config = WidgetConfig(kind: .vlc)
+        config.style = style
+        return SpotifyWidgetRenderer.style(for: config, columns: columns, rows: rows)
     }
 
     @MainActor
     static func draw(_ state: VLCState, config: WidgetConfig, columns: Int, rows: Int,
                      background: NSColor, ctx: CGContext) {
-        let cell = CGFloat(DeckLayout.keyPixels)
-        let frame = CGRect(x: 0, y: 0, width: cell * CGFloat(columns), height: cell * CGFloat(rows))
-        let brand = WidgetPaint.mix(NSColor(srgbRed: 0.95, green: 0.51, blue: 0.11, alpha: 1),
-                                    .white, state.playing ? 0.12 : 0.35)    // VLC cone orange
-
-        // A problem replaces the face entirely. A widget that cannot reach
-        // VLC but still draws a progress bar is lying about the state of
-        // something in another room.
-        guard state.ok else {
-            WidgetPaint.message("VLC", state.error.isEmpty ? "connecting…" : state.error,
-                                frame: frame, ctx: ctx, tint: brand)
-            return
-        }
-
-        // The record's own colour once there is art to take it from, so the
-        // face is tinted by what is playing rather than by a brand orange.
-        let accent = state.art == nil ? brand : state.accent
-
-        switch resolvedStyle(config.style, columns: columns, rows: rows) {
-        case "art":      drawArt(state, config: config, frame: frame, cell: cell,
-                                 accent: accent, ctx: ctx)
-        case "split":    drawSplit(state, frame: frame, cell: cell, columns: columns,
-                                   rows: rows, accent: accent, background: background, ctx: ctx)
-        case "button":   drawButton(state, config: config, frame: frame, cell: cell,
-                                    accent: accent, ctx: ctx)
-        case "controls": drawControls(state, frame: frame, cell: cell, columns: columns,
-                                      accent: accent, ctx: ctx)
-        case "text":     drawText(state, frame: frame, cell: cell, accent: accent,
-                                  background: background, ctx: ctx, progress: false)
-        default:         drawText(state, frame: frame, cell: cell, accent: accent,
-                                  background: background, ctx: ctx, progress: true)
-        }
-    }
-
-    /// The cover, with the title over it and the transport badge in the
-    /// corner. What a 1x1 or 2x2 block should be.
-    @MainActor
-    private static func drawArt(_ state: VLCState, config: WidgetConfig, frame: CGRect,
-                                cell: CGFloat, accent: NSColor, ctx: CGContext) {
-        guard state.art != nil else {
-            drawText(state, frame: frame, cell: cell, accent: accent,
-                     background: .black, ctx: ctx, progress: false)
-            return
-        }
-        drawArtBackground(state, frame: frame, ctx: ctx)
-        let unit = min(frame.width, frame.height)
-        if frame.height > cell * 1.4, state.hasTrack {
-            let size = unit * 0.13
-            WidgetPaint.line(state.displayTitle,
-                             in: CGRect(x: frame.minX + unit * 0.06, y: frame.minY + unit * 0.12,
-                                        width: frame.width - unit * 0.12, height: size),
-                             ctx: ctx, size: size, color: .white, align: .left)
-            if !state.artist.isEmpty {
-                WidgetPaint.line(state.artist,
-                                 in: CGRect(x: frame.minX + unit * 0.06, y: frame.minY + unit * 0.04,
-                                            width: frame.width - unit * 0.12, height: size * 0.8),
-                                 ctx: ctx, size: size * 0.78, color: WidgetPaint.muted, align: .left)
-            }
-        }
-        let action = config.press == "none" ? "" : config.press
-        if !action.isEmpty {
-            WidgetPaint.actionBadge(VLCProvider.glyphName(for: action, playing: state.playing),
-                                    frame: frame, cell: cell, tint: accent, ctx: ctx)
-        } else {
-            WidgetPaint.stateDot(playing: state.playing, frame: frame, cell: cell,
-                                 accent: accent, ctx: ctx)
-        }
-    }
-
-    /// A square of cover art filling as many WHOLE keys as it can, beside a
-    /// panel with the text and the progress.
-    ///
-    /// Deliberately the same shape, the same tinted panel and the SAME
-    /// progress block as the Spotify widget's split face — a deck showing
-    /// both should not look like it was assembled from two apps. The bar
-    /// itself is `WidgetPaint.progressBlock`, which both call, so they cannot
-    /// drift apart.
-    @MainActor
-    private static func drawSplit(_ state: VLCState, frame: CGRect, cell: CGFloat,
-                                  columns: Int, rows: Int, accent: NSColor,
-                                  background: NSColor, ctx: CGContext) {
-        // Art fills the height it was given, always leaving a column for the
-        // panel. Sizing off a fraction of the width leaves a wide widget with
-        // a small cover floating between two dead bands.
-        let artKeys = max(1, min(rows, columns - 1))
-        let artSide = CGFloat(artKeys) * cell
-        let artRect = CGRect(x: frame.minX, y: frame.minY + (frame.height - artSide) / 2,
-                             width: artSide, height: artSide)
-        let panel = CGRect(x: frame.minX + artSide, y: frame.minY,
-                           width: frame.width - artSide, height: frame.height)
-        let tint = WidgetPaint.mix(background, accent, 0.18)
-        WidgetPaint.fill(panel, tint, ctx: ctx)
-        if let art = state.art {
-            WidgetPaint.drawCover(art, in: artRect, ctx: ctx)
-        } else {
-            WidgetPaint.fill(artRect, WidgetPaint.mix(background, accent, 0.35), ctx: ctx)
-            WidgetPaint.glyph("music.note", in: artRect.insetBy(dx: artSide * 0.32,
-                                                                dy: artSide * 0.32),
-                              color: accent, ctx: ctx)
-        }
-
-        guard panel.width > cell * 0.6 else { return }
-        let pad = max(6, cell * 0.12)
-        let inner = panel.insetBy(dx: pad, dy: pad)
-        let foreground = NSColor.white
-        let dim = WidgetPaint.mix(tint, foreground, 0.62)
-        // Type scales with the PANEL, not the key: that is the whole point of
-        // giving a widget more room.
-        let unit = min(panel.height, panel.width * 0.7)
-        let barHeight = max(4, unit * 0.055)
-        let labelSize = max(9, unit * 0.10)
-        let barY = inner.maxY - barHeight - labelSize * 1.35
-
-        var y = inner.minY
-        // The state dot sits in the panel's top-right, so the title gets a
-        // narrower line than everything under it.
-        let badgeAllowance = cell * 0.36
-        y += WidgetPaint.line(state.displayTitle,
-                              in: CGRect(x: inner.minX, y: y,
-                                         width: max(inner.width - badgeAllowance, inner.width * 0.5),
-                                         height: unit * 0.3),
-                              ctx: ctx, size: unit * 0.20, color: foreground)
-        y += WidgetPaint.line(state.artist, in: CGRect(x: inner.minX, y: y,
-                                                       width: inner.width, height: unit * 0.24),
-                              ctx: ctx, size: unit * 0.145, color: dim)
-        if barY - y > unit * 0.18 {
-            WidgetPaint.line(state.album, in: CGRect(x: inner.minX, y: y,
-                                                     width: inner.width, height: unit * 0.2),
-                             ctx: ctx, size: unit * 0.115,
-                             color: WidgetPaint.mix(tint, foreground, 0.42))
-        }
-        WidgetPaint.stateDot(playing: state.playing, frame: panel, cell: cell,
-                             accent: accent, ctx: ctx)
-        guard barY > inner.minY, state.length > 0 else { return }
-        WidgetPaint.progressBlock(x: inner.minX, y: barY, width: inner.width, height: barHeight,
-                                  fraction: state.position,
-                                  elapsed: VLCState.clock(state.time),
-                                  total: VLCState.clock(state.length),
-                                  accent: accent,
-                                  track: WidgetPaint.mix(tint, foreground, 0.22),
-                                  labelSize: labelSize, labelGap: max(2, unit * 0.04),
-                                  bottom: frame.maxY, ctx: ctx)
-    }
-
-    /// One key, one control. The glyph comes from the same function the press
-    /// uses, so what it shows is what it does.
-    @MainActor
-    private static func drawButton(_ state: VLCState, config: WidgetConfig, frame: CGRect,
-                                   cell: CGFloat, accent: NSColor, ctx: CGContext) {
-        let action = config.press == "none" ? "play_pause" : config.press
-        let name = VLCProvider.glyphName(for: action, playing: state.playing)
-        let side = min(frame.width, frame.height) * 0.42
-        WidgetPaint.glyph(name, in: CGRect(x: frame.midX - side / 2, y: frame.midY - side / 2,
-                                           width: side, height: side),
-                          color: accent, ctx: ctx)
-        WidgetPaint.stateDot(playing: state.playing, frame: frame, cell: cell,
-                             accent: accent, ctx: ctx)
-    }
-
-    /// A transport bar: each key its own button, repeated rather than
-    /// stretched when two keys share one.
-    @MainActor
-    private static func drawControls(_ state: VLCState, frame: CGRect, cell: CGFloat,
-                                     columns: Int, accent: NSColor, ctx: CGContext) {
-        for dx in 0..<columns {
-            let action = VLCProvider.transportAction(dx: dx, columns: columns)
-            let name = VLCProvider.glyphName(for: action, playing: state.playing)
-            let box = CGRect(x: CGFloat(dx) * cell, y: frame.minY, width: cell, height: frame.height)
-            let side = min(box.width, box.height) * 0.40
-            WidgetPaint.glyph(name, in: CGRect(x: box.midX - side / 2, y: box.midY - side / 2,
-                                               width: side, height: side),
-                              color: accent, ctx: ctx)
-        }
-    }
-
-    /// What is playing, in as much detail as the span allows.
-    @MainActor
-    private static func drawText(_ state: VLCState, frame: CGRect, cell: CGFloat,
-                                 accent: NSColor, background: NSColor,
-                                 ctx: CGContext, progress: Bool) {
-        guard state.hasTrack else {
-            WidgetPaint.message("VLC", state.stopped ? "stopped" : "nothing playing",
-                                frame: frame, ctx: ctx, tint: accent)
-            return
-        }
-        let pad = max(6, cell * 0.10)
-        let unit = min(frame.width / 2, frame.height)
-        let inner = frame.insetBy(dx: pad, dy: pad)
-
-        // The widget frame's origin is at the visual TOP-left: `minY` is the
-        // top of the key you are looking at. Laying out from `maxY` put the
-        // title under the album, which is the wrong way up.
-        let titleSize = unit * 0.20
-        let subSize = unit * 0.14
-        let gap = max(1, unit * 0.02)
-
-        // The progress block is anchored to the bottom and the text flows
-        // from the top, so a 2-row and a 3-row widget put the bar in the same
-        // place instead of leaving it floating.
-        var bottom = inner.maxY
-        if progress, state.length > 0 {
-            // The same block the split face and the Spotify widget draw, so
-            // one bar does not look like a different app's from the next.
-            let barHeight = max(4, unit * 0.055)
-            let labelSize = max(9, unit * 0.10)
-            bottom = inner.maxY - barHeight - labelSize * 1.35
-            WidgetPaint.progressBlock(x: inner.minX, y: bottom, width: inner.width,
-                                      height: barHeight, fraction: state.position,
-                                      elapsed: VLCState.clock(state.time),
-                                      total: VLCState.clock(state.length),
-                                      accent: accent,
-                                      track: WidgetPaint.mix(background, .white, 0.22),
-                                      labelSize: labelSize, labelGap: max(2, unit * 0.04),
-                                      bottom: frame.maxY, ctx: ctx)
-        }
-
-        var y = inner.minY
-        WidgetPaint.line(state.displayTitle,
-                         in: CGRect(x: inner.minX, y: y, width: inner.width, height: titleSize),
-                         ctx: ctx, size: titleSize * 0.86, color: .white, align: .left)
-        y += titleSize + gap
-        if !state.artist.isEmpty, y + subSize <= bottom {
-            WidgetPaint.line(state.artist,
-                             in: CGRect(x: inner.minX, y: y, width: inner.width, height: subSize),
-                             ctx: ctx, size: subSize * 0.86, color: WidgetPaint.muted, align: .left)
-            y += subSize + gap
-        }
-        if !state.album.isEmpty, y + subSize <= bottom {
-            WidgetPaint.line(state.album,
-                             in: CGRect(x: inner.minX, y: y, width: inner.width, height: subSize),
-                             ctx: ctx, size: subSize * 0.78, color: WidgetPaint.muted, align: .left)
-        }
-        WidgetPaint.stateDot(playing: state.playing, frame: frame, cell: cell,
-                             accent: accent, ctx: ctx)
+        SpotifyWidgetRenderer.draw(state.face, config: config, columns: columns,
+                                   rows: rows, background: background, ctx: ctx)
     }
 }

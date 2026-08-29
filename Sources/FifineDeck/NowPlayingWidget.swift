@@ -1,6 +1,51 @@
 import AppKit
 import Foundation
 
+/// What a now-playing face needs, whoever is playing it.
+///
+/// The renderer used to take a `SpotifyNowPlaying`, so VLC grew a parallel set
+/// of faces — and the two immediately disagreed about what a 3x2 widget should
+/// look like, because each was choosing its own layout. One value type means
+/// one renderer, one set of `auto` rules, and no way for them to diverge.
+struct NowPlayingFace {
+    var ok = false
+    var playing = false
+    var title = ""
+    var artist = ""
+    var album = ""
+    var progressMS = 0
+    var durationMS = 0
+    var art: CGImage? = nil
+    var accent: NSColor = WidgetPaint.green
+
+    var error = ""
+    /// What the "cannot reach it" face says, and its colour. The only thing
+    /// about a face that is allowed to know which player it came from.
+    var brand = "Spotify"
+    var brandTint: NSColor = WidgetPaint.green
+
+    var hasTrack: Bool { !title.isEmpty || !artist.isEmpty }
+}
+
+extension SpotifyNowPlaying {
+    var face: NowPlayingFace {
+        NowPlayingFace(ok: ok, playing: playing, title: title, artist: artist, album: album,
+                       progressMS: progressMS, durationMS: durationMS, art: art, accent: accent,
+                       error: error, brand: "Spotify", brandTint: WidgetPaint.green)
+    }
+}
+
+extension VLCState {
+    /// VLC counts in seconds and calls the title something else when there is
+    /// no metadata; the face wants milliseconds and one title.
+    var face: NowPlayingFace {
+        NowPlayingFace(ok: ok, playing: playing, title: displayTitle, artist: artist, album: album,
+                       progressMS: time * 1000, durationMS: length * 1000, art: art, accent: accent,
+                       error: error, brand: "VLC",
+                       brandTint: NSColor(srgbRed: 0.95, green: 0.51, blue: 0.11, alpha: 1))
+    }
+}
+
 /// Whichever of Spotify or VLC is actually playing.
 ///
 /// Composed rather than reimplemented: it asks the two existing providers and
@@ -114,8 +159,7 @@ actor NowPlayingProvider: WidgetProviding {
     /// Both transport bars map a column to the same three buttons, so this
     /// answers without needing to know which source is showing.
     nonisolated func action(for config: WidgetConfig, cell: WidgetCell) -> String {
-        guard config.style == "controls" else { return config.press }
-        return VLCProvider.transportAction(dx: cell.dx, columns: cell.columns)
+        SpotifyWidgetRenderer.pressAction(config: config, cell: cell)
     }
 
     /// Routed to whatever the key is currently showing — which is what makes
@@ -144,12 +188,13 @@ actor NowPlayingProvider: WidgetProviding {
         let now: NowPlaying = snapshot.data() ?? NowPlaying()
         switch now.source {
         case .spotify:
-            SpotifyProvider().draw(WidgetSnapshot(signature: "", payload: now.spotify),
-                                   config: config, columns: columns, rows: rows,
-                                   background: background, ctx: ctx)
+            SpotifyWidgetRenderer.draw(now.spotify?.face ?? NowPlayingFace(), config: config,
+                                       columns: columns, rows: rows,
+                                       background: background, ctx: ctx)
         case .vlc:
-            VLCWidgetRenderer.draw(now.vlc ?? VLCState(), config: config, columns: columns,
-                                   rows: rows, background: background, ctx: ctx)
+            SpotifyWidgetRenderer.draw(now.vlc?.face ?? NowPlayingFace(), config: config,
+                                       columns: columns, rows: rows,
+                                       background: background, ctx: ctx)
         case .none:
             let frame = CGRect(x: 0, y: 0,
                                width: CGFloat(DeckLayout.keyPixels * columns),

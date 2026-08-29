@@ -234,16 +234,20 @@ Windows box, a media PC, a Mac in another room.
 | Layout | `Automatic`, or force one of: progress · text · one button · transport bar |
 | On press | play/pause, next, previous, stop, or nothing |
 
-`Automatic` gives a single key the play/pause button, a wide 1-row span the
-transport bar (each key its own control), a wide-and-tall span the cover
-beside an info panel, and anything else the title, artist and a progress bar.
+**VLC has no faces of its own.** It builds a `NowPlayingFace` — title,
+artist, album, elapsed, duration, art, accent — and the Spotify widget's
+renderer draws it. So `Automatic` picks the same layout for a 3×2 VLC widget
+as for a 3×2 Spotify one, the cover is framed the same way, and the progress
+bar is the same bar.
 
-The faces are deliberately the Spotify widget's: the same square-of-whole-keys
-cover, the same tinted panel, and — literally the same function —
-`WidgetPaint.progressBlock` for the bar and its timestamps. A deck showing
-both players should not look like it was assembled from two apps, and sharing
-the drawing is the only way to keep that true. A test fails if either face
-starts drawing its own bar.
+That is not tidiness. Two renderers meant two sets of `auto` rules, and the
+two widgets visibly disagreed about what a 3×2 should look like — neither
+wrong, just nothing making them agree. A test now asserts they resolve
+identically at every span from 1×1 to 5×3, and another fails if
+`VLCWidget.swift` draws a single pixel of its own.
+
+The refactor was proved to change nothing: all 56 Spotify faces (every style ×
+seven spans) were rendered to PNG before and after and compared byte for byte.
 
 **Turn VLC's web interface on first** — it is off by default. On the machine
 running VLC: Preferences → *Show settings **All*** → Interface → Main
