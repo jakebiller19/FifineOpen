@@ -286,11 +286,25 @@ struct WidgetEditor: View {
         let source = WidgetCredentials.source(.vlcPassword)
         return VStack(alignment: .leading, spacing: 10) {
             labelled("Address of the machine running VLC") {
-                TextField("192.168.1.10:8080", text: $place)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focus, equals: .place)
-                    .onSubmit { commit(\.place, place) }
-                    .onChange(of: focus) { if $0 != .place { commit(\.place, place) } }
+                HStack(spacing: 6) {
+                    TextField("192.168.1.10:8080", text: $place)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focus, equals: .place)
+                        .onSubmit { commit(\.place, place) }
+                        .onChange(of: focus) { if $0 != .place { commit(\.place, place) } }
+                    // An explicit Apply, matching the password's Save below.
+                    // Typing an address and walking away left the widget on
+                    // the OLD one, and the key then said "offline" - which
+                    // reads as a network fault rather than an unsaved field.
+                    Button("Apply") { commit(\.place, place) }
+                        .controlSize(.small)
+                        .disabled(place == config.place)
+                }
+            }
+            if place != config.place {
+                Label("Not applied yet — press Return or Apply",
+                      systemImage: "exclamationmark.circle")
+                    .font(.system(size: 10)).foregroundStyle(.orange)
             }
             labelled("Web interface password") {
                 HStack(spacing: 6) {

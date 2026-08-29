@@ -2193,10 +2193,37 @@ final class VLCWidgetTests: XCTestCase {
     }
 
     func testAutoPicksALayoutThatFitsTheSpan() {
+        // One key is a control: a single glyph is all that reads at 100 px.
         XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 1, rows: 1), "button")
+        // A wide single row is the transport bar.
         XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 1), "controls")
-        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 2), "progress")
+        // Wide AND tall has room for square cover art beside a text panel.
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 3, rows: 2), "split")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 4, rows: 2), "split")
+        // Too narrow to split: text and a progress bar instead.
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("auto", columns: 2, rows: 2), "progress")
+        // An explicit choice is never overridden.
         XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("text", columns: 1, rows: 1), "text")
+        XCTAssertEqual(VLCWidgetRenderer.resolvedStyle("art", columns: 3, rows: 2), "art")
+    }
+
+    func testTheArtStylesAreOffered() {
+        XCTAssertTrue(WidgetKind.vlc.styles.contains("art"))
+        XCTAssertTrue(WidgetKind.vlc.styles.contains("split"))
+    }
+
+    func testArtIsPartOfTheSignatureSoTheKeyRepaintsWhenItArrives() {
+        // VLC fetches artwork asynchronously after a track starts, so the
+        // cover turns up a refresh or two late. Without this the frame would
+        // be considered unchanged and never redrawn.
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let context = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8,
+                                bytesPerRow: 0, space: space,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        var without = VLCState(); without.title = "x"
+        var withArt = without; withArt.art = context.makeImage()
+        XCTAssertNotNil(withArt.art)
+        XCTAssertNotEqual(without.signature, withArt.signature)
     }
 
     func testTheClockReadsLikeAClock() {

@@ -33,6 +33,17 @@ struct VLCState {
     var host = ""
     var error = ""
 
+    /// Cover art, from VLC's own `/art` endpoint.
+    var art: CGImage? = nil
+    /// Pulled out of the art, so the face is tinted by the record rather than
+    /// by a fixed brand colour.
+    var accent: NSColor = NSColor(srgbRed: 0.95, green: 0.51, blue: 0.11, alpha: 1)
+
+    /// What identifies the CURRENT item. `/art` has no per-track URL — it
+    /// always serves whatever is playing now — so this is what the art cache
+    /// is keyed on, and what tells us the art must be re-fetched.
+    var trackIdentity: String { "\(title)|\(artist)|\(album)|\(filename)" }
+
     /// What to put on the key. VLC often has no metadata at all — playing a
     /// file straight off disk gives a filename and nothing else — so the
     /// filename is the fallback, stripped of its extension because
@@ -51,7 +62,7 @@ struct VLCState {
         // Time is bucketed to the second: a widget on a 1 s interval must not
         // rewrite the key for every millisecond of drift.
         "\(ok)|\(reachable)|\(playing)|\(stopped)|\(displayTitle)|\(artist)|\(album)"
-            + "|\(time)|\(length)|\(error)"
+            + "|\(time)|\(length)|\(error)|\(art != nil)"
     }
 
     static func clock(_ seconds: Int) -> String {
@@ -67,6 +78,12 @@ struct VLCState {
 actor VLCProvider: WidgetProviding {
     private static let timeout: TimeInterval = 4      // it is on the LAN
     static let defaultPort = 8080
+
+    private var artCache: [String: CGImage] = [:]
+    private var artOrder: [String] = []
+    private static let artCacheLimit = 6
+    /// A cover is a few hundred KB; anything this size is not one.
+    private static let maximumArtBytes = 12 * 1024 * 1024
 
     nonisolated func placeholder(_ config: WidgetConfig, cells: Int) -> WidgetSnapshot {
         let state = VLCState(host: config.place)
@@ -117,6 +134,17 @@ actor VLCProvider: WidgetProviding {
     /// VLC's HTTP interface uses Basic auth with an EMPTY user name and the
     /// Lua password. Sending a user name is the usual reason a correct
     /// password still gets a 401.
+    /// The current item's cover. VLC serves it at `/art` with the same auth.
+    private static func artURL(_ config: WidgetConfig) -> URL? {
+        guard let (host, port) = address(config.place) else { return nil }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        components.path = "/art"
+        return components.url
+    }
+
     private static func request(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
@@ -152,6 +180,10 @@ actor VLCProvider: WidgetProviding {
             }
             Self.apply(json, to: &state)
             state.ok = true
+            if state.hasTrack, let art = await artwork(config, identity: state.trackIdentity) {
+                state.art = art
+                state.accent = WidgetPaint.accent(from: art)
+            }
         } catch {
             // Nothing answered. The machine is asleep, VLC is closed, the web
             // interface was never enabled, or a firewall ate it — all of which
@@ -223,6 +255,31 @@ actor VLCProvider: WidgetProviding {
         if let d = value as? Double { return Int(d) }
         if let s = value as? String { return Int(s) ?? 0 }
         return 0
+    }
+
+    /// Cover art, cached per track.
+    ///
+    /// A failure is deliberately NOT remembered. VLC fetches artwork
+    /// asynchronously after a track starts, so the first ask often lands
+    /// before the art exists — caching that "no" would mean the cover never
+    /// appears for the rest of the track. Retrying costs one small request on
+    /// your own LAN.
+    private func artwork(_ config: WidgetConfig, identity: String) async -> CGImage? {
+        guard !identity.isEmpty else { return nil }
+        if let cached = artCache[identity] { return cached }
+        guard let url = Self.artURL(config),
+              let (data, response) = try? await URLSession.shared.data(for: Self.request(url)),
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              data.count <= Self.maximumArtBytes,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+        artCache[identity] = image
+        artOrder.append(identity)
+        while artOrder.count > Self.artCacheLimit {
+            artCache.removeValue(forKey: artOrder.removeFirst())
+        }
+        return image
     }
 
     private func snapshot(_ state: VLCState) -> WidgetSnapshot {
@@ -304,9 +361,23 @@ enum VLCWidgetRenderer {
     /// bigger has room for text and a progress bar.
     static func resolvedStyle(_ style: String, columns: Int, rows: Int) -> String {
         guard style == "auto" else { return style }
+        // A single key is a control - one glyph is all that reads at 100px.
         if columns == 1 && rows == 1 { return "button" }
+        // A wide single row is a transport bar: each key its own button.
         if rows == 1 && columns >= 3 { return "controls" }
+        // Wide and tall enough for a square of art beside a panel of text.
+        if columns >= 3 && rows >= 2 { return "split" }
         return "progress"
+    }
+
+    /// Cover art behind the whole face, dimmed enough for text to sit on it.
+    @MainActor
+    private static func drawArtBackground(_ state: VLCState, frame: CGRect, ctx: CGContext) {
+        guard let art = state.art else { return }
+        WidgetPaint.drawCover(art, in: frame, ctx: ctx)
+        // Without a scrim, a title lands on whatever the cover happens to be
+        // and half of them are white.
+        WidgetPaint.scrim(frame, ctx: ctx)
     }
 
     @MainActor
@@ -314,19 +385,27 @@ enum VLCWidgetRenderer {
                      background: NSColor, ctx: CGContext) {
         let cell = CGFloat(DeckLayout.keyPixels)
         let frame = CGRect(x: 0, y: 0, width: cell * CGFloat(columns), height: cell * CGFloat(rows))
-        let accent = WidgetPaint.mix(NSColor(srgbRed: 0.95, green: 0.51, blue: 0.11, alpha: 1),
-                                     .white, state.playing ? 0.12 : 0.35)   // VLC cone orange
+        let brand = WidgetPaint.mix(NSColor(srgbRed: 0.95, green: 0.51, blue: 0.11, alpha: 1),
+                                    .white, state.playing ? 0.12 : 0.35)    // VLC cone orange
 
         // A problem replaces the face entirely. A widget that cannot reach
         // VLC but still draws a progress bar is lying about the state of
         // something in another room.
         guard state.ok else {
             WidgetPaint.message("VLC", state.error.isEmpty ? "connecting…" : state.error,
-                                frame: frame, ctx: ctx, tint: accent)
+                                frame: frame, ctx: ctx, tint: brand)
             return
         }
 
+        // The record's own colour once there is art to take it from, so the
+        // face is tinted by what is playing rather than by a brand orange.
+        let accent = state.art == nil ? brand : state.accent
+
         switch resolvedStyle(config.style, columns: columns, rows: rows) {
+        case "art":      drawArt(state, config: config, frame: frame, cell: cell,
+                                 accent: accent, ctx: ctx)
+        case "split":    drawSplit(state, frame: frame, cell: cell, columns: columns,
+                                   rows: rows, accent: accent, background: background, ctx: ctx)
         case "button":   drawButton(state, config: config, frame: frame, cell: cell,
                                     accent: accent, ctx: ctx)
         case "controls": drawControls(state, frame: frame, cell: cell, columns: columns,
@@ -336,6 +415,67 @@ enum VLCWidgetRenderer {
         default:         drawText(state, frame: frame, cell: cell, accent: accent,
                                   background: background, ctx: ctx, progress: true)
         }
+    }
+
+    /// The cover, with the title over it and the transport badge in the
+    /// corner. What a 1x1 or 2x2 block should be.
+    @MainActor
+    private static func drawArt(_ state: VLCState, config: WidgetConfig, frame: CGRect,
+                                cell: CGFloat, accent: NSColor, ctx: CGContext) {
+        guard state.art != nil else {
+            drawText(state, frame: frame, cell: cell, accent: accent,
+                     background: .black, ctx: ctx, progress: false)
+            return
+        }
+        drawArtBackground(state, frame: frame, ctx: ctx)
+        let unit = min(frame.width, frame.height)
+        if frame.height > cell * 1.4, state.hasTrack {
+            let size = unit * 0.13
+            WidgetPaint.line(state.displayTitle,
+                             in: CGRect(x: frame.minX + unit * 0.06, y: frame.minY + unit * 0.12,
+                                        width: frame.width - unit * 0.12, height: size),
+                             ctx: ctx, size: size, color: .white, align: .left)
+            if !state.artist.isEmpty {
+                WidgetPaint.line(state.artist,
+                                 in: CGRect(x: frame.minX + unit * 0.06, y: frame.minY + unit * 0.04,
+                                            width: frame.width - unit * 0.12, height: size * 0.8),
+                                 ctx: ctx, size: size * 0.78, color: WidgetPaint.muted, align: .left)
+            }
+        }
+        let action = config.press == "none" ? "" : config.press
+        if !action.isEmpty {
+            WidgetPaint.actionBadge(VLCProvider.glyphName(for: action, playing: state.playing),
+                                    frame: frame, cell: cell, tint: accent, ctx: ctx)
+        } else {
+            WidgetPaint.stateDot(playing: state.playing, frame: frame, cell: cell,
+                                 accent: accent, ctx: ctx)
+        }
+    }
+
+    /// A square of cover art filling as many WHOLE keys as it can, beside a
+    /// panel with the text and the progress. The same shape the Spotify
+    /// widget uses for a wide block, and for the same reason: art wants to be
+    /// square, and cropping it to a 3x2 rectangle throws away the record.
+    @MainActor
+    private static func drawSplit(_ state: VLCState, frame: CGRect, cell: CGFloat,
+                                  columns: Int, rows: Int, accent: NSColor,
+                                  background: NSColor, ctx: CGContext) {
+        let artKeys = min(rows, max(1, columns - 1))     // square, in whole keys
+        let artSide = CGFloat(artKeys) * cell
+        let artRect = CGRect(x: frame.minX, y: frame.maxY - artSide,
+                             width: artSide, height: artSide)
+        if let art = state.art {
+            WidgetPaint.drawCover(art, in: artRect, ctx: ctx)
+        } else {
+            WidgetPaint.fill(artRect, WidgetPaint.mix(background, accent, 0.20), ctx: ctx)
+            WidgetPaint.glyph("music.note", in: artRect.insetBy(dx: artSide * 0.3, dy: artSide * 0.3),
+                              color: accent, ctx: ctx)
+        }
+        let panel = CGRect(x: artRect.maxX, y: frame.minY,
+                           width: frame.maxX - artRect.maxX, height: frame.height)
+        guard panel.width > cell * 0.5 else { return }
+        drawText(state, frame: panel, cell: cell, accent: accent,
+                 background: background, ctx: ctx, progress: true)
     }
 
     /// One key, one control. The glyph comes from the same function the press
@@ -383,43 +523,47 @@ enum VLCWidgetRenderer {
         let unit = min(frame.width / 2, frame.height)
         let inner = frame.insetBy(dx: pad, dy: pad)
 
-        // Laid out from the bottom: the progress row is a fixed height and
-        // everything above it takes what is left, so a 2-row widget and a
-        // 3-row widget put the bar in the same place.
-        var y = inner.minY
+        // The widget frame's origin is at the visual TOP-left: `minY` is the
+        // top of the key you are looking at. Laying out from `maxY` put the
+        // title under the album, which is the wrong way up.
+        let titleSize = unit * 0.20
+        let subSize = unit * 0.14
+        let gap = max(1, unit * 0.02)
+
+        // The progress block is anchored to the bottom and the text flows
+        // from the top, so a 2-row and a 3-row widget put the bar in the same
+        // place instead of leaving it floating.
+        var bottom = inner.maxY
         if progress, state.length > 0 {
             let barHeight = max(3, unit * 0.05)
             let labels = unit * 0.16
+            bottom -= labels
             WidgetPaint.line(VLCState.clock(state.time),
-                             in: CGRect(x: inner.minX, y: y, width: inner.width / 2, height: labels),
+                             in: CGRect(x: inner.minX, y: bottom, width: inner.width / 2, height: labels),
                              ctx: ctx, size: labels * 0.82, color: WidgetPaint.muted, align: .left)
             WidgetPaint.line(VLCState.clock(state.length),
-                             in: CGRect(x: inner.midX, y: y, width: inner.width / 2, height: labels),
+                             in: CGRect(x: inner.midX, y: bottom, width: inner.width / 2, height: labels),
                              ctx: ctx, size: labels * 0.82, color: WidgetPaint.muted, align: .right)
-            y += labels + max(2, unit * 0.03)
-            WidgetPaint.progressBar(CGRect(x: inner.minX, y: y, width: inner.width, height: barHeight),
+            bottom -= barHeight + gap * 2
+            WidgetPaint.progressBar(CGRect(x: inner.minX, y: bottom, width: inner.width, height: barHeight),
                                     fraction: state.position, accent: accent,
                                     track: WidgetPaint.mix(background, .white, 0.22), ctx: ctx)
-            y += barHeight + max(3, unit * 0.06)
         }
 
-        let top = inner.maxY
-        let titleSize = unit * 0.20
-        let subSize = unit * 0.14
-        var cursor = top - titleSize
+        var y = inner.minY
         WidgetPaint.line(state.displayTitle,
-                         in: CGRect(x: inner.minX, y: cursor, width: inner.width, height: titleSize),
+                         in: CGRect(x: inner.minX, y: y, width: inner.width, height: titleSize),
                          ctx: ctx, size: titleSize * 0.86, color: .white, align: .left)
-        if !state.artist.isEmpty, cursor - subSize > y {
-            cursor -= subSize + max(1, unit * 0.02)
+        y += titleSize + gap
+        if !state.artist.isEmpty, y + subSize <= bottom {
             WidgetPaint.line(state.artist,
-                             in: CGRect(x: inner.minX, y: cursor, width: inner.width, height: subSize),
+                             in: CGRect(x: inner.minX, y: y, width: inner.width, height: subSize),
                              ctx: ctx, size: subSize * 0.86, color: WidgetPaint.muted, align: .left)
+            y += subSize + gap
         }
-        if !state.album.isEmpty, cursor - subSize > y {
-            cursor -= subSize + max(1, unit * 0.02)
+        if !state.album.isEmpty, y + subSize <= bottom {
             WidgetPaint.line(state.album,
-                             in: CGRect(x: inner.minX, y: cursor, width: inner.width, height: subSize),
+                             in: CGRect(x: inner.minX, y: y, width: inner.width, height: subSize),
                              ctx: ctx, size: subSize * 0.78, color: WidgetPaint.muted, align: .left)
         }
         WidgetPaint.stateDot(playing: state.playing, frame: frame, cell: cell,

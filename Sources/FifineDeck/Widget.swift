@@ -54,7 +54,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .sports:   return ["auto", "score", "compact"]
         case .timer:    return ["auto", "ring", "digits"]
         case .calendar: return ["auto", "next", "agenda"]
-        case .vlc:      return ["auto", "progress", "text", "button", "controls"]
+        case .vlc:      return ["auto", "art", "split", "progress", "text", "button", "controls"]
         }
     }
 
