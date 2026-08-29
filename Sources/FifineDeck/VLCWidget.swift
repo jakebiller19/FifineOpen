@@ -453,29 +453,78 @@ enum VLCWidgetRenderer {
     }
 
     /// A square of cover art filling as many WHOLE keys as it can, beside a
-    /// panel with the text and the progress. The same shape the Spotify
-    /// widget uses for a wide block, and for the same reason: art wants to be
-    /// square, and cropping it to a 3x2 rectangle throws away the record.
+    /// panel with the text and the progress.
+    ///
+    /// Deliberately the same shape, the same tinted panel and the SAME
+    /// progress block as the Spotify widget's split face — a deck showing
+    /// both should not look like it was assembled from two apps. The bar
+    /// itself is `WidgetPaint.progressBlock`, which both call, so they cannot
+    /// drift apart.
     @MainActor
     private static func drawSplit(_ state: VLCState, frame: CGRect, cell: CGFloat,
                                   columns: Int, rows: Int, accent: NSColor,
                                   background: NSColor, ctx: CGContext) {
-        let artKeys = min(rows, max(1, columns - 1))     // square, in whole keys
+        // Art fills the height it was given, always leaving a column for the
+        // panel. Sizing off a fraction of the width leaves a wide widget with
+        // a small cover floating between two dead bands.
+        let artKeys = max(1, min(rows, columns - 1))
         let artSide = CGFloat(artKeys) * cell
-        let artRect = CGRect(x: frame.minX, y: frame.maxY - artSide,
+        let artRect = CGRect(x: frame.minX, y: frame.minY + (frame.height - artSide) / 2,
                              width: artSide, height: artSide)
+        let panel = CGRect(x: frame.minX + artSide, y: frame.minY,
+                           width: frame.width - artSide, height: frame.height)
+        let tint = WidgetPaint.mix(background, accent, 0.18)
+        WidgetPaint.fill(panel, tint, ctx: ctx)
         if let art = state.art {
             WidgetPaint.drawCover(art, in: artRect, ctx: ctx)
         } else {
-            WidgetPaint.fill(artRect, WidgetPaint.mix(background, accent, 0.20), ctx: ctx)
-            WidgetPaint.glyph("music.note", in: artRect.insetBy(dx: artSide * 0.3, dy: artSide * 0.3),
+            WidgetPaint.fill(artRect, WidgetPaint.mix(background, accent, 0.35), ctx: ctx)
+            WidgetPaint.glyph("music.note", in: artRect.insetBy(dx: artSide * 0.32,
+                                                                dy: artSide * 0.32),
                               color: accent, ctx: ctx)
         }
-        let panel = CGRect(x: artRect.maxX, y: frame.minY,
-                           width: frame.maxX - artRect.maxX, height: frame.height)
-        guard panel.width > cell * 0.5 else { return }
-        drawText(state, frame: panel, cell: cell, accent: accent,
-                 background: background, ctx: ctx, progress: true)
+
+        guard panel.width > cell * 0.6 else { return }
+        let pad = max(6, cell * 0.12)
+        let inner = panel.insetBy(dx: pad, dy: pad)
+        let foreground = NSColor.white
+        let dim = WidgetPaint.mix(tint, foreground, 0.62)
+        // Type scales with the PANEL, not the key: that is the whole point of
+        // giving a widget more room.
+        let unit = min(panel.height, panel.width * 0.7)
+        let barHeight = max(4, unit * 0.055)
+        let labelSize = max(9, unit * 0.10)
+        let barY = inner.maxY - barHeight - labelSize * 1.35
+
+        var y = inner.minY
+        // The state dot sits in the panel's top-right, so the title gets a
+        // narrower line than everything under it.
+        let badgeAllowance = cell * 0.36
+        y += WidgetPaint.line(state.displayTitle,
+                              in: CGRect(x: inner.minX, y: y,
+                                         width: max(inner.width - badgeAllowance, inner.width * 0.5),
+                                         height: unit * 0.3),
+                              ctx: ctx, size: unit * 0.20, color: foreground)
+        y += WidgetPaint.line(state.artist, in: CGRect(x: inner.minX, y: y,
+                                                       width: inner.width, height: unit * 0.24),
+                              ctx: ctx, size: unit * 0.145, color: dim)
+        if barY - y > unit * 0.18 {
+            WidgetPaint.line(state.album, in: CGRect(x: inner.minX, y: y,
+                                                     width: inner.width, height: unit * 0.2),
+                             ctx: ctx, size: unit * 0.115,
+                             color: WidgetPaint.mix(tint, foreground, 0.42))
+        }
+        WidgetPaint.stateDot(playing: state.playing, frame: panel, cell: cell,
+                             accent: accent, ctx: ctx)
+        guard barY > inner.minY, state.length > 0 else { return }
+        WidgetPaint.progressBlock(x: inner.minX, y: barY, width: inner.width, height: barHeight,
+                                  fraction: state.position,
+                                  elapsed: VLCState.clock(state.time),
+                                  total: VLCState.clock(state.length),
+                                  accent: accent,
+                                  track: WidgetPaint.mix(tint, foreground, 0.22),
+                                  labelSize: labelSize, labelGap: max(2, unit * 0.04),
+                                  bottom: frame.maxY, ctx: ctx)
     }
 
     /// One key, one control. The glyph comes from the same function the press
@@ -535,19 +584,19 @@ enum VLCWidgetRenderer {
         // place instead of leaving it floating.
         var bottom = inner.maxY
         if progress, state.length > 0 {
-            let barHeight = max(3, unit * 0.05)
-            let labels = unit * 0.16
-            bottom -= labels
-            WidgetPaint.line(VLCState.clock(state.time),
-                             in: CGRect(x: inner.minX, y: bottom, width: inner.width / 2, height: labels),
-                             ctx: ctx, size: labels * 0.82, color: WidgetPaint.muted, align: .left)
-            WidgetPaint.line(VLCState.clock(state.length),
-                             in: CGRect(x: inner.midX, y: bottom, width: inner.width / 2, height: labels),
-                             ctx: ctx, size: labels * 0.82, color: WidgetPaint.muted, align: .right)
-            bottom -= barHeight + gap * 2
-            WidgetPaint.progressBar(CGRect(x: inner.minX, y: bottom, width: inner.width, height: barHeight),
-                                    fraction: state.position, accent: accent,
-                                    track: WidgetPaint.mix(background, .white, 0.22), ctx: ctx)
+            // The same block the split face and the Spotify widget draw, so
+            // one bar does not look like a different app's from the next.
+            let barHeight = max(4, unit * 0.055)
+            let labelSize = max(9, unit * 0.10)
+            bottom = inner.maxY - barHeight - labelSize * 1.35
+            WidgetPaint.progressBlock(x: inner.minX, y: bottom, width: inner.width,
+                                      height: barHeight, fraction: state.position,
+                                      elapsed: VLCState.clock(state.time),
+                                      total: VLCState.clock(state.length),
+                                      accent: accent,
+                                      track: WidgetPaint.mix(background, .white, 0.22),
+                                      labelSize: labelSize, labelGap: max(2, unit * 0.04),
+                                      bottom: frame.maxY, ctx: ctx)
         }
 
         var y = inner.minY

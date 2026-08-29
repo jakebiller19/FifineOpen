@@ -2363,3 +2363,21 @@ final class NowPlayingTests: XCTestCase {
         XCTAssertEqual(NowPlayingProvider().action(for: config, cell: cell), "next")
     }
 }
+
+/// The progress block is shared, not imitated.
+extension VLCWidgetTests {
+
+    func testEveryNowPlayingFaceDrawsTheSameBar() throws {
+        // The bar, its two timestamps and their geometry live in one function
+        // that Spotify's faces and VLC's faces both call. Imitating it in two
+        // places is how a deck ends up looking assembled from two apps.
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/FifineDeck/VLCWidget.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("WidgetPaint.progressBlock"),
+                      "VLC should draw the shared block")
+        XCTAssertFalse(source.contains("WidgetPaint.progressBar("),
+                       "a face drawing its own bar has stopped sharing")
+    }
+}

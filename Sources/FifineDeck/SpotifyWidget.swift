@@ -842,25 +842,22 @@ enum SpotifyWidgetRenderer {
                                  labelSize: CGFloat? = nil) {
         let fraction = state.durationMS > 0
             ? Double(state.progressMS) / Double(state.durationMS) : 0
-        WidgetPaint.progressBar(CGRect(x: x, y: y, width: width, height: height),
-                                fraction: fraction, accent: accent, track: track, ctx: ctx)
-        guard labels else { return }
+        guard labels else {
+            WidgetPaint.progressBar(CGRect(x: x, y: y, width: width, height: height),
+                                    fraction: fraction, accent: accent, track: track, ctx: ctx)
+            return
+        }
         // Explicit when the caller already reserved space for them: deriving
         // the size from `cell` when `cell` is a whole panel produced labels
-        // bigger than the gap left for them, and the fit guard below then
-        // silently dropped the times entirely.
-        let size = labelSize ?? max(8, cell * 0.12)
-        let labelY = y + height + max(2, cell * 0.04)
-        // A half-drawn timestamp reads as a rendering fault; no timestamp just
-        // reads as a smaller face.
-        guard labelY + size * 1.3 <= bottom else { return }
-        let color = WidgetPaint.mix(track, .white, 0.7)
-        WidgetPaint.line(clock(state.progressMS),
-                         in: CGRect(x: x, y: labelY, width: width / 2, height: size * 1.3),
-                         ctx: ctx, size: size, color: color)
-        WidgetPaint.line(clock(state.durationMS),
-                         in: CGRect(x: x + width / 2, y: labelY, width: width / 2, height: size * 1.3),
-                         ctx: ctx, size: size, color: color, align: .right)
+        // bigger than the gap left for them, and the fit guard then silently
+        // dropped the times entirely.
+        WidgetPaint.progressBlock(x: x, y: y, width: width, height: height,
+                                  fraction: fraction,
+                                  elapsed: clock(state.progressMS), total: clock(state.durationMS),
+                                  accent: accent, track: track,
+                                  labelSize: labelSize ?? max(8, cell * 0.12),
+                                  labelGap: max(2, cell * 0.04),
+                                  bottom: bottom, ctx: ctx)
     }
 
     private static func clock(_ ms: Int) -> String {

@@ -242,6 +242,30 @@ enum WidgetPaint {
     /// Line chart of `values` inside `rect`, with an optional fill underneath.
     /// A flat series still draws a centred line rather than vanishing — a
     /// stock that has not ticked yet is data, not an error.
+    /// The progress bar plus its two timestamps, as one block.
+    ///
+    /// Shared by every now-playing face there is — Spotify's and VLC's — so
+    /// that "the same bar" is a fact about the code rather than a promise.
+    /// The geometry is passed in rather than derived here because the callers
+    /// have already reserved the space for it.
+    static func progressBlock(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat,
+                              fraction: Double, elapsed: String, total: String,
+                              accent: NSColor, track: NSColor,
+                              labelSize: CGFloat, labelGap: CGFloat,
+                              bottom: CGFloat, ctx: CGContext) {
+        progressBar(CGRect(x: x, y: y, width: width, height: height),
+                    fraction: fraction, accent: accent, track: track, ctx: ctx)
+        let labelY = y + height + labelGap
+        // A half-drawn timestamp reads as a rendering fault; no timestamp just
+        // reads as a smaller face.
+        guard labelY + labelSize * 1.3 <= bottom else { return }
+        let color = mix(track, .white, 0.7)
+        line(elapsed, in: CGRect(x: x, y: labelY, width: width / 2, height: labelSize * 1.3),
+             ctx: ctx, size: labelSize, color: color)
+        line(total, in: CGRect(x: x + width / 2, y: labelY, width: width / 2, height: labelSize * 1.3),
+             ctx: ctx, size: labelSize, color: color, align: .right)
+    }
+
     static func sparkline(_ values: [Double], in rect: CGRect, ctx: CGContext,
                           color: NSColor, fill: NSColor? = nil, width: CGFloat = 2) {
         guard values.count >= 2, rect.width > 1, rect.height > 1 else { return }

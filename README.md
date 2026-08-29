@@ -235,8 +235,15 @@ Windows box, a media PC, a Mac in another room.
 | On press | play/pause, next, previous, stop, or nothing |
 
 `Automatic` gives a single key the play/pause button, a wide 1-row span the
-transport bar (each key its own control), and anything larger the title,
-artist and a progress bar.
+transport bar (each key its own control), a wide-and-tall span the cover
+beside an info panel, and anything else the title, artist and a progress bar.
+
+The faces are deliberately the Spotify widget's: the same square-of-whole-keys
+cover, the same tinted panel, and — literally the same function —
+`WidgetPaint.progressBlock` for the bar and its timestamps. A deck showing
+both players should not look like it was assembled from two apps, and sharing
+the drawing is the only way to keep that true. A test fails if either face
+starts drawing its own bar.
 
 **Turn VLC's web interface on first** — it is off by default. On the machine
 running VLC: Preferences → *Show settings **All*** → Interface → Main
