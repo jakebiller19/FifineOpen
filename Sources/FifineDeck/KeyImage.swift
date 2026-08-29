@@ -6,9 +6,21 @@ enum KeyImage {
     /// before it goes out. Confirmed on hardware.
     private static let rotate180 = true
 
-    /// Builds a `DeckLayout.keyPixels` square JPEG from a background colour,
-    /// an optional custom image, and an optional label.
-    static func jpeg(color: NSColor, image: NSImage?, label: String) -> Data? {
+    /// The deck's picture of one key, from the whole configuration.
+    ///
+    /// The single entry point the controller uses, so a background that gains
+    /// a feature — a gradient, say — reaches the hardware without every call
+    /// site having to learn about it.
+    static func jpeg(for config: KeyConfig) -> Data? {
+        jpeg(color: config.nsColor, gradientTo: config.gradientEnd,
+             radial: config.gradientIsRadial, image: config.image, label: config.label)
+    }
+
+    /// Builds a `DeckLayout.keyPixels` square JPEG from a background — a flat
+    /// colour, or a gradient to `gradientTo` — an optional custom image, and
+    /// an optional label.
+    static func jpeg(color: NSColor, gradientTo: NSColor? = nil, radial: Bool = false,
+                     image: NSImage?, label: String) -> Data? {
         let side = DeckLayout.keyPixels
         // Must be 32-bit RGBA: a 24-bit rep is not a valid drawing destination,
         // and NSGraphicsContext(bitmapImageRep:) returns nil for one. JPEG
@@ -32,8 +44,23 @@ enum KeyImage {
             t.concat()
         }
 
-        (color.usingColorSpace(.deviceRGB) ?? .black).setFill()
-        bounds.fill()
+        let start = color.usingColorSpace(.deviceRGB) ?? .black
+        if let end = gradientTo?.usingColorSpace(.deviceRGB),
+           let gradient = NSGradient(starting: start, ending: end) {
+            if radial {
+                // Fills the rect from the middle outwards. The same spread
+                // the on-screen previews use, so the grid and the key agree.
+                gradient.draw(in: bounds, relativeCenterPosition: .zero)
+            } else {
+                // -90° is top to bottom. Drawn inside the 180° rotation
+                // above, like the artwork and the label, so "top" here is the
+                // top of the key you are looking at.
+                gradient.draw(in: bounds, angle: -90)
+            }
+        } else {
+            start.setFill()
+            bounds.fill()
+        }
 
         // Custom art is scaled to cover the key, cropped to the square.
         if let image {

@@ -78,8 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Leave the deck in a clean state rather than mid-frame.
+    /// Leave the deck in a clean state rather than mid-frame, and flush the
+    /// settings: writes are coalesced, so an edit made a moment before
+    /// quitting is still pending here.
     func applicationWillTerminate(_ notification: Notification) {
+        DeckController.shared.saveNow()
         DeckController.shared.disconnect()
     }
 }

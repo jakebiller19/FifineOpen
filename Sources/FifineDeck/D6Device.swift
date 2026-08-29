@@ -38,6 +38,13 @@ final class D6Device {
     /// writes. `false` means it needs a physical replug.
     var onHealthChange: ((Bool) -> Void)?
 
+    /// Fire on the main queue when a D6 appears on, or leaves, the bus.
+    /// `startWatching()` has to be called for either to happen.
+    var onDeviceAttached: (() -> Void)?
+    var onDeviceRemoved: (() -> Void)?
+
+    private var watcher: IOHIDManager?
+
     private var consecutiveFailures = 0
     private(set) var healthy = true
 
@@ -64,6 +71,64 @@ final class D6Device {
         return set.first
     }
 
+    // MARK: - Hotplug
+
+    /// Watches the bus for the deck being plugged in or unplugged.
+    ///
+    /// Observational only: this manager never writes to the deck and never
+    /// owns the handle the rest of the class uses. It exists because
+    /// `findDevice()` can only answer "is there a D6 attached" at the moment
+    /// something asks, so nothing was ever watching, and the app could not
+    /// tell a deck that had gone away from one it had simply never found.
+    ///
+    /// The case that actually matters is the replug. A stalled deck is only
+    /// recoverable by unplugging it, and until now the app sat there saying
+    /// so until the user found the Connect button. Now the removal and the
+    /// arrival are both seen, and it reconnects itself.
+    func startWatching() {
+        guard watcher == nil else { return }
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let match: [String: Any] = [
+            kIOHIDVendorIDKey as String: Self.vendorID,
+            kIOHIDProductIDKey as String: Self.productID,
+        ]
+        IOHIDManagerSetDeviceMatching(manager, match as CFDictionary)
+
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, _ in
+            guard let context else { return }
+            let me = Unmanaged<D6Device>.fromOpaque(context).takeUnretainedValue()
+            DeckLog.write("fifine: deck attached")
+            DispatchQueue.main.async { me.onDeviceAttached?() }
+        }, context)
+
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, _ in
+            guard let context else { return }
+            let me = Unmanaged<D6Device>.fromOpaque(context).takeUnretainedValue()
+            DeckLog.write("fifine: deck removed")
+            me.handleRemoval()
+        }, context)
+
+        // The main run loop, not the reader thread's: that one only exists
+        // while a device is open, which is exactly when this is not needed.
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        watcher = manager
+    }
+
+    /// Both callbacks can fire twice for one deck - it publishes two usage
+    /// collections on a single interface, and each is matched - so whatever
+    /// acts on these has to tolerate the repeat.
+    private func handleRemoval() {
+        // NOT `disconnect()`: that sends a DIS packet first, and writing to a
+        // device that has just been unplugged fails. Three failures is what
+        // the health tracker reads as the write-endpoint stall, so tearing
+        // down politely here made unplugging the deck report "deck stopped
+        // responding - replug it" about a deck that had only been unplugged.
+        teardown(sendDisconnect: false)
+        DispatchQueue.main.async { self.onDeviceRemoved?() }
+    }
+
     // MARK: - Lifecycle
 
     /// Opens the deck and performs the handshake it requires before it will
@@ -83,9 +148,11 @@ final class D6Device {
         return true
     }
 
-    func disconnect() {
+    func disconnect() { teardown(sendDisconnect: true) }
+
+    private func teardown(sendDisconnect: Bool) {
         guard let dev = device else { return }
-        _ = send(D6Protocol.disconnect())
+        if sendDisconnect { _ = send(D6Protocol.disconnect()) }
         // Deliberately NOT unregistering the input callback here. Passing a
         // null callback is the documented way to do it, but the buffer now
         // outlives the device by design and re-registering on the next
@@ -98,6 +165,11 @@ final class D6Device {
         }
         IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
         device = nil
+        // A fresh handle starts healthy: the stall belongs to the connection,
+        // not to the object, and carrying it across a replug would leave the
+        // app permanently convinced the deck was broken.
+        consecutiveFailures = 0
+        healthy = true
     }
 
     /// The opening sequence the vendor app performs. Not optional: without it

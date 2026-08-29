@@ -310,6 +310,10 @@ struct ContentView: View {
                             .lineLimit(1).truncationMode(.middle)
                     }
                 }
+                ImagePrompt(placeholder: "neon gradient waves, a dark topographic map…",
+                            defaultStyle: .art) { prompt, style in
+                    deck.generateWallpaper(prompt: prompt, style: style)
+                }
             }
 
             if deck.pattern.isAnimated {
@@ -335,6 +339,21 @@ struct ContentView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
+
+            Toggle(isOn: Binding(get: { deck.openAtLogin },
+                                 set: { deck.setOpenAtLogin($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Open at login").font(.system(size: 11))
+                    Text(deck.loginItemProblem
+                         ?? "The deck is blank until this app is running, so it starts with your Mac.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(deck.loginItemProblem == nil ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!deck.canOpenAtLogin)
 
             Divider().opacity(0.3)
 
@@ -383,6 +402,46 @@ struct ContentView: View {
                 set: { deck.setAction($0, for: deck.selected) })
     }
 
+    /// The second colour, and how it is spread.
+    ///
+    /// Collapsed to a single switch until it is on: a key is a flat colour
+    /// nearly always, and two colour wells and a picker sitting there
+    /// permanently would cost every key's editor to serve the exception.
+    @ViewBuilder
+    private func gradientEditor(_ index: Int) -> some View {
+        let config = deck.keys[index]
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: Binding(
+                get: { config.hasGradient },
+                set: { on in
+                    deck.setGradient(on ? deck.suggestedGradientEnd(for: index) : nil,
+                                     for: index)
+                })) {
+                Text("Gradient").font(.system(size: 11))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if let end = config.gradientEnd {
+                ColorPicker("Fades to", selection: Binding(
+                    get: { Color(nsColor: end) },
+                    set: { deck.setGradient(NSColor($0).hexString, for: index) }),
+                            supportsOpacity: false)
+                .font(.system(size: 11))
+
+                Picker("", selection: Binding(
+                    get: { config.gradientIsRadial ? "radial" : "linear" },
+                    set: { deck.setGradientStyle($0, for: index) })) {
+                    Text("Linear").tag("linear")
+                    Text("Radial").tag("radial")
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .labelsHidden()
+            }
+        }
+    }
+
     private var keyEditor: some View {
         let index = deck.selected
         return VStack(alignment: .leading, spacing: 12) {
@@ -404,6 +463,8 @@ struct ContentView: View {
                 get: { deck.keys[index].color },
                 set: { deck.setColor($0, for: index) }), supportsOpacity: false)
             .font(.system(size: 11))
+
+            gradientEditor(index)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("Label").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -429,6 +490,11 @@ struct ContentView: View {
                     Text((path as NSString).lastPathComponent)
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
+                }
+
+                ImagePrompt(placeholder: "a coffee cup, an owl, a power symbol…",
+                            defaultStyle: .icon) { prompt, style in
+                    deck.generateImage(prompt: prompt, style: style, for: index)
                 }
             }
 
@@ -463,7 +529,7 @@ struct KeyView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(config.color)
+            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(config.background)
             if let widgetImage {
                 Image(nsImage: widgetImage)
                     .resizable().aspectRatio(contentMode: .fill)
@@ -758,5 +824,92 @@ enum GifPreview {
         }
         let scale = max(side / image.size.width, side / image.size.height)
         return CGSize(width: image.size.width * scale, height: image.size.height * scale)
+    }
+}
+
+/// Prompt in, picture out — on one key, or across the whole deck.
+///
+/// Deliberately inline rather than a sheet. A generation takes about a
+/// second and lands straight on the hardware, so the useful loop is type,
+/// look at the deck, adjust the words, go again — and a modal in the middle
+/// of that is a door to open and close fifteen times.
+struct ImagePrompt: View {
+    @EnvironmentObject var deck: DeckController
+
+    var placeholder: String
+    var defaultStyle: ImageGen.Style
+    var generate: (String, ImageGen.Style) -> Void
+
+    @State private var prompt = ""
+    @State private var style: ImageGen.Style = .icon
+    /// Set on first appearance rather than in an initialiser: `@State` cannot
+    /// be seeded from a parameter without the value going stale on redraw.
+    @State private var styled = false
+
+    private var ready: Bool {
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !deck.generating && deck.canGenerate
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Divider().opacity(0.25).padding(.vertical, 2)
+
+            HStack(spacing: 6) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.accent)
+                Text("Generate").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 6) {
+                TextField(placeholder, text: $prompt)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .disabled(!deck.canGenerate)
+                    // Return does what the button does: this is a field you
+                    // come back to, not a form you fill in once.
+                    .onSubmit { if ready { run() } }
+                Button(deck.generating ? "…" : "Make") { run() }
+                    .controlSize(.small)
+                    .disabled(!ready)
+            }
+
+            Picker("", selection: $style) {
+                ForEach(ImageGen.Style.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .labelsHidden()
+            .disabled(!deck.canGenerate)
+
+            Text(note)
+                .font(.system(size: 10))
+                .foregroundStyle(noteColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear {
+            guard !styled else { return }
+            style = defaultStyle
+            styled = true
+        }
+    }
+
+    private var note: String {
+        if !deck.canGenerate {
+            return "Needs a fal.ai key. Put FAL_KEY in the .env next to the app, then press Reload in the Widget card."
+        }
+        if deck.generating { return "Drawing it…" }
+        if let problem = deck.generatorProblem { return problem }
+        return style.help
+    }
+
+    private var noteColor: Color {
+        if !deck.canGenerate || deck.generatorProblem != nil { return .orange }
+        return .secondary
+    }
+
+    private func run() {
+        generate(prompt, style)
     }
 }

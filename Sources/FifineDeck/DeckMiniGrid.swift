@@ -55,7 +55,7 @@ private struct MiniKey: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: side * 0.18, style: .continuous)
-                .fill(config.color)
+                .fill(config.background)
             if let face {
                 Image(nsImage: face)
                     .resizable().aspectRatio(contentMode: .fill)

@@ -3,6 +3,11 @@
 A small native Swift/SwiftUI app for the **fifine D6** macro keypad
 (USB `3142:0007`, 15 keys in 3 rows of 5).
 
+The hardware: [FIFINE AmpliGame Stream Controller
+(D6)](https://www.amazon.com/dp/B0D9JFT7JS) — the 15-key deck this drives.
+It ships with the vendor's own Windows-first software; this is a native macOS
+replacement for it, speaking the protocol recovered from that app.
+
 Set a colour, a custom image, and a label per key. Key presses are wired to a
 minimal action harness that is deliberately bare — that is where richer actions
 get added later.
@@ -25,12 +30,38 @@ To see logs while it runs:
 ```
 
 Requires macOS 13+ and a Swift toolchain (Xcode or the Command Line Tools).
-The app connects on launch; **Connect** re-scans if the deck was plugged in late.
+The app connects on launch, and again by itself whenever the deck is plugged
+in; **Connect** forces a re-scan.
+
+### The icon
+
+The app icon is **drawn in code**, not exported from a design tool:
+
+```sh
+swift Tools/make_icon.swift     # rewrites Resources/AppIcon.icns
+```
+
+It renders the deck itself — the real 5x3 key layout, lit by the same kind of
+diagonal colour sweep the Rainbow and Wave patterns paint — from a single
+description scaled to every slice `iconutil` wants, so the 16pt and 1024pt
+versions cannot drift apart. The body is a superellipse rather than a rounded
+rectangle, which is the shape macOS's own icons use; circular corners read as
+pinched beside them.
+
+`Resources/AppIcon.icns` is committed, so a build never depends on
+re-rendering it; `build_app.sh` copies it into the bundle. Regenerate only
+when the drawing changes.
 
 ## Using it
 
 - **Click a key** in the grid to select it.
 - **Background** — colour picker; the key updates on the deck immediately.
+- **Gradient** — a switch, then a second colour and *Linear* or *Radial*.
+  Flipping it on picks a second colour that already looks deliberate: away
+  from the base towards black, or towards white when the base is dark enough
+  that there is nowhere else to go. The on-screen grid and the menu bar
+  thumbnail draw the same gradient the hardware gets, so the preview is a
+  preview rather than an approximation.
 - **Label** — text drawn over the key, with a shadow so it stays readable.
 - **Image** — scaled to cover the key, cropped square.
 - **GIF** — an animated GIF on a single key (see *Animation* below).
@@ -39,6 +70,10 @@ The app connects on launch; **Connect** re-scans if the deck was plugged in late
 - **Push all** — re-sends every key, ignoring the diff cache.
 
 Settings persist to `~/Library/Application Support/FifineDeck/settings.json`.
+Writes are **coalesced**: an edit lands about half a second after you stop
+making it, so dragging the colour picker or the brightness slider does not put
+a file write inside the drag loop. Quitting and closing the window both flush
+first, so nothing is lost on the way out.
 
 ## Menu bar & background running
 
@@ -62,6 +97,30 @@ Keys*, and *Quit*; clicking the Dock icon also brings the window back.
 
 Quit properly from the menu bar item (or Cmd-Q with the window focused); the app
 disconnects cleanly on the way out rather than leaving the deck mid-frame.
+
+**Open at Login** is in the menu and in the *Deck* card. It is worth turning on:
+the keys are blank until this app is running, so without it a reboot leaves you
+with a dark deck. It goes through `SMAppService`, and the switch shows what the
+system actually thinks — macOS can leave a registration waiting for approval in
+System Settings, and the app says so rather than claiming it worked. The setting
+is **not** in `settings.json`: that file is the deck layout, the thing you copy
+to another Mac, and whether *this* Mac starts the app is not part of it.
+
+## Plugging and unplugging
+
+The app watches the bus, so it **connects itself** when the deck is plugged in
+and notices when it is pulled out — no need to press **Connect**.
+
+This matters most for the failure this deck actually has. A stalled deck can
+only be recovered by unplugging it, and the app used to sit there telling you
+so until you found the button; now the removal and the arrival are both seen
+and it comes back on its own.
+
+The watcher is observational: it never writes to the deck and never holds the
+handle the rest of the app uses. Unplugging is also told apart from stalling —
+tearing the connection down politely would write to a device that has just
+gone, and three failed writes are exactly what the health check reads as the
+stall, so an unplugged deck used to be reported as a broken one.
 
 ## Deck patterns
 
@@ -244,11 +303,11 @@ Three sources, first hit wins:
    what the key editor writes when you press Save.
 
 3. **a `.env` file**, for sharing one file with whatever scripts already read
-   it. Put it next to `FifineDeck.app` (that is, in this folder):
+   it. Put it next to `FifineDeck.app` (that is, in this folder) — start from
+   the committed template, which documents every key:
 
-   ```
-   FINNHUB_KEY=…        # FINNHUN is accepted too
-   SPOTIFY_CLIENT_ID=…
+   ```sh
+   cp -n .env.template .env     # -n: never clobber a .env you already have
    ```
 
    Searched in order: `$FIFINE_DECK_ENV`, then `.env` walking up from the app
@@ -262,7 +321,130 @@ Three sources, first hit wins:
 `widgets.json` deliberately beats `.env`, so pressing Save always takes effect.
 None of this is in `settings.json`: that file is the deck layout — the thing
 you would copy to another machine — and it must never carry a token with it.
-`.gitignore` excludes `.env` for the same reason.
+`.gitignore` excludes `.env` for the same reason; `.env.template` is committed
+because it holds no values.
+
+### The keys, and which ones you actually need
+
+| Key | Needed for | Where it comes from |
+|---|---|---|
+| `FINNHUB_KEY` | the **Stocks** widget | [finnhub.io](https://finnhub.io), free tier |
+| `FINNHUN` | the same thing | an alias for an older `.env`; set one, not both |
+| `SPOTIFY_CLIENT_ID` | Spotify source = **your account** | the Spotify dashboard |
+| `SPOTIFY_REFRESH_TOKEN` | the same | **Connect Spotify…** writes it for you |
+| `FAL_KEY` | **generated artwork** | [fal.ai](https://fal.ai) → Dashboard → Keys |
+| `FIFINE_DECK_ENV` | pointing at a `.env` elsewhere | your shell, *not* the `.env` |
+
+Everything else runs with no credentials at all: weather (Open-Meteo), sports
+(ESPN), clock, timer, calendar, system monitor, and — the point worth
+repeating — **Spotify's default source**.
+
+**There is no Spotify API key, and the normal setup needs none.** The default
+source shells out to `osascript` and asks the desktop app what is playing
+(`SpotifyProvider.localNowPlaying`), which costs one Automation prompt and no
+account. `SPOTIFY_CLIENT_ID` and `SPOTIFY_REFRESH_TOKEN` belong to a *second,
+optional* source that follows playback on other devices. With neither set,
+`source: "auto"` goes straight to the local app and everything works.
+
+`FIFINE_DECK_ENV` is read from the environment, so putting it inside a `.env`
+does nothing: the file has to be found before it can be read.
+
+### Spotify: exactly what to set
+
+The default source, **Spotify on this Mac**, needs none of this. It asks the
+desktop app what is playing over Apple Events, so it costs one permission
+prompt and no account. Only go through the following if you want the deck to
+follow playback on **another device** — your phone, a speaker.
+
+1. [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+   → **Create app**. Any name.
+2. **Redirect URI — this exact string:**
+
+   ```
+   http://127.0.0.1:8888/callback
+   ```
+
+   Not `localhost`. Spotify matches the redirect literally and the app's login
+   listener binds `127.0.0.1`, so the two spellings are not interchangeable —
+   a mismatch fails with `INVALID_CLIENT: Invalid redirect URI` before a login
+   page ever appears. No trailing slash.
+3. Tick **Web API**.
+4. Copy the **Client ID** into the widget editor (or `SPOTIFY_CLIENT_ID`).
+   Leave the client *secret* alone — the login is PKCE and never sends one.
+5. Press **Connect Spotify…**, approve in the browser, done. The refresh token
+   is written to `widgets.json` at mode `0600`.
+
+Port 8888 has to be free while step 5 runs, and only while it runs. The scopes
+requested are `user-read-playback-state` and `user-modify-playback-state` — the
+second is what lets a transport key actually skip a track. If you log in with
+an account other than the one that created the app, add it under the app's
+**User Management**, because a Development-mode app only admits accounts listed
+there.
+
+Setting `SPOTIFY_REFRESH_TOKEN` in a `.env` by hand works — moving a going
+setup to another Mac is the reason to — but it will not stay authoritative:
+Spotify rotates refresh tokens, and the app saves the rotated one to
+`widgets.json`, which then outranks the file. Treat that line as a way in
+rather than as the store.
+
+The web source needs **both** values. With only one of them the key says
+`not logged in`.
+
+## Generated artwork
+
+Type what you want on a key and it is drawn and on the hardware in about a
+second — through [fal.ai](https://fal.ai)'s Ideogram v4 *instant* model. Set
+`FAL_KEY` and a **Generate** field appears under *Artwork* in the key editor,
+and under *Image across deck* in the Deck card. Without a key the field is
+disabled and says so; nothing else changes.
+
+Three directions, because a key is 100×100 and a metre away:
+
+| | For |
+|---|---|
+| **Icon** | one bold symbol, flat background, no lettering — what survives key size |
+| **Logo** | lettering, drawn large enough to read |
+| **Art** | a free picture; best across the whole deck or on a widget-sized block |
+
+What you type leads the prompt and the direction is appended, so "a red panda"
+becomes a flat high-contrast icon rather than a photograph. Ideogram's own
+**prompt expansion is off**: it rewrites what you typed, and measured against
+this endpoint it cost 46 s against 0.3 s of actual inference — the instant
+model stopped being instant.
+
+**Icon and Logo results are re-framed after they arrive**, and this is not
+left to the prompt. The model composes to fill its frame, so a subject comes
+back touching an edge or pushed to one side however explicitly you ask for a
+margin — and on a 100 px key that is the difference between a symbol and a
+smudge. So the app finds the background colour from the border, takes the
+bounding box of everything that is not it, and redraws that centred with an
+even margin on the picture's own background. Deterministic: centred whatever
+came back. An image with no margin anywhere is left alone (there is nothing to
+measure against, and shrinking it would be a guess), and **Art** is exempt
+because filling the frame is the point of it.
+
+The request goes to fal's synchronous endpoint rather than its queue. A
+generation is under a second, so submit-then-poll would spend longer in round
+trips than in inference. A key asks for a 512² square; the deck asks for
+1280×768, which is exactly the 5:3 of the canvas `DeckCanvas` slices, so the
+picture is generated in the right shape rather than cropped into it.
+
+Images are written to
+`~/Library/Application Support/FifineDeck/Generated/`, named after the prompt
+and stamped, and referenced from `settings.json` by path — **not** a temp
+directory, which would blank the key on the next reboot. Asking twice keeps
+both answers. Deleting one blanks the key that used it.
+
+Every press is a **paid call** on your fal balance. The button takes one at a
+time rather than queueing, and failures name the fix (`fal.ai rejected the key
+— check FAL_KEY`, `out of credit`, `rate limited`).
+
+The tests cover the prompt shaping, the request body, the file naming and every
+error path without spending a call. There is one live test, off by default:
+
+```sh
+FIFINE_LIVE_TESTS=1 swift test --filter testAgainstTheRealAPI
+```
 
 ## Adding a widget
 
@@ -334,7 +516,7 @@ time proportional to its size (`D6Device.pacingPerKey`), and the animation
 clock runs at 4 fps rather than the 15 the bus would carry. **Smoother
 animation** in the Deck panel raises that, and says plainly what it risks.
 
-If your keys have gone dead: unplug, replug, press Connect.
+If your keys have gone dead: unplug and replug. The app reconnects itself.
 
 **GIFs are software-driven.** The protocol carries still JPEGs only — there is
 no hardware GIF support. A GIF is decoded at load time, each frame pre-rendered
@@ -389,6 +571,8 @@ Sources/FifineDeck/
   D6Protocol.swift      packet construction + key layout
   KeyImage.swift        renders a key to the JPEG the deck wants
   KeyAction.swift       the press-action harness
+  ImageGen.swift        prompt -> key artwork, via fal.ai Ideogram v4
+  LoginItem.swift       open at login, via SMAppService
   DeckCanvas.swift      full-deck canvas + slicing into key tiles
   DeckPattern.swift     whole-deck patterns, static and animated
   GifPlayer.swift       GIF decoding + frame pre-rendering
@@ -401,8 +585,12 @@ Sources/FifineDeck/
   SpotifyAuth.swift     one-off PKCE login on a loopback listener
   StocksWidget.swift    Finnhub quotes + ticker faces
 Tests/FifineDeckTests/  span layout, config validation, rendering
+Tools/make_icon.swift   draws the app icon -> Resources/AppIcon.icns
+Resources/AppIcon.icns  the generated icon, committed
 build_app.sh            builds FifineDeck.app
+dist.sh                 packages a shareable zip, and proves it carries no keys
 Info.plist              bundle metadata
+.env.template           every credential key, documented; copy to .env
 ```
 
 Run the tests with `swift test`. They cover the span layout, config validation
@@ -451,14 +639,78 @@ it received and anything that failed.
 The one to know: **if keys stop responding while the displays keep updating,
 the deck has stopped sending input.** Unplug it and plug it back in. That is a
 fault in the deck — the same stall that afflicts its write endpoint — and no
-software change recovers it.
+software change recovers it. The app does now handle the *rest* of it: it sees
+the unplug and the replug and reconnects itself, so the fix is the replug alone.
+
+## Giving it to someone else
+
+```sh
+./dist.sh          # dist/FifineDeck-0.1.0.zip, and nothing else
+```
+
+**Do not zip this folder.** The `.env` lives next to `FifineDeck.app` by
+design, so the obvious way to share the app is also the way to hand over your
+Finnhub, fal and Spotify credentials. `dist.sh` stages only the bundle, and
+then proves the staged copy carries none of your `.env` values before it makes
+the archive — it refuses, naming the variable and never printing it, if one
+turns up.
+
+**It will not open on another Mac as it stands.** The signature is ad-hoc, so
+Gatekeeper reports the app as damaged. A build for other people needs a
+Developer ID certificate, the hardened runtime, and notarising; `dist.sh`
+prints the three commands.
+
+### What is and is not in the repository
+
+| | Where it lives | Committed |
+|---|---|---|
+| `.env` | next to the app | no — `.gitignore`, and `.env.*` with it |
+| `.env.template` | the repo | yes — it carries no values |
+| `widgets.json` | Application Support, mode `0600` | no |
+| `settings.json` | Application Support | no |
+| generated artwork | Application Support | no |
+
+Two tests enforce this rather than leaving it to habit: one fails if any file
+`git commit -a` would publish contains a credential assignment or a PEM block,
+and one fails if `.env`, `widgets.json` or `settings.json` ever stops being
+ignored. Both have been checked against a planted secret, because a guard that
+has never fired is not known to work.
+
+### Two things worth knowing before you share a layout
+
+- **`settings.json` stores Run-command strings in plain text.** It is the file
+  you copy to another machine, so a key whose command carries a token carries
+  it along. Put the token in the environment and reference it, or keep that
+  key off a layout you share.
+- **A failing command is logged in full**, to
+  `~/Library/Application Support/FifineDeck/debug.log`, command text included.
+  That is deliberate — a command that fails silently is indistinguishable from
+  a key that did nothing — but it means a secret on a command line ends up in
+  the log.
+
+### What leaves your machine
+
+Nothing until you add a widget that needs it, and nothing about you:
+
+| Host | Sent when |
+|---|---|
+| `fal.run`, `v3b.fal.media` | you press **Make** — your prompt, your fal key |
+| `finnhub.io` | a Stocks widget refreshes — the symbols |
+| `api.spotify.com`, `accounts.spotify.com` | only the *account* source |
+| `i.scdn.co` | album art for the Spotify widget |
+| `api.open-meteo.com` | a Weather widget — the place or coordinates |
+| `site.api.espn.com` | a Sports widget — the league |
+| `127.0.0.1:8888` | the one-off Spotify login, on the loopback only |
+
+There is no analytics, no crash reporting and no update check. The Spotify
+*local* source, the clock, the timer, the calendar and the system monitor
+never touch the network at all.
 
 ## Known gaps
 
 - No profiles, pages, or folders. One page, 15 keys.
 - Widgets are polled, not pushed: a track change shows up on the next refresh,
   not the instant it happens.
-- Hotplug is not detected; press **Connect** after replugging.
 - Full-deck animation is capped by the hardware at ~2 fps, so smooth effects
   have to be ones that change only a few keys per frame.
 - Only one GIF plays comfortably at a time; several share the same write budget.

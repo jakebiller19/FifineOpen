@@ -6,6 +6,14 @@ import UniformTypeIdentifiers
 /// Everything one key holds. Persisted as JSON.
 struct KeyConfig: Codable, Equatable {
     var colorHex: String = "#1E1E28"
+    /// The far end of a background gradient. Nil is a flat colour, which is
+    /// what every key written before this existed decodes as.
+    var gradientHex: String? = nil
+    /// `"linear"` or `"radial"`. A String rather than an enum on purpose: an
+    /// unknown raw value in a hand-edited `settings.json` would throw out of
+    /// the decoder and take the whole layout with it, where an unrecognised
+    /// string here simply falls back to linear.
+    var gradientStyle: String? = nil
     var imagePath: String? = nil
     var gifPath: String? = nil
     var label: String = ""
@@ -19,6 +27,37 @@ struct KeyConfig: Codable, Equatable {
 
     var nsColor: NSColor {
         NSColor(hex: colorHex) ?? NSColor(red: 0.12, green: 0.12, blue: 0.16, alpha: 1)
+    }
+
+    /// The far end of the gradient, or nil when this key is a flat colour.
+    /// An unreadable hex is treated as absent rather than as black.
+    var gradientEnd: NSColor? { gradientHex.flatMap { NSColor(hex: $0) } }
+
+    var hasGradient: Bool { gradientEnd != nil }
+
+    var gradientIsRadial: Bool { gradientStyle == "radial" }
+
+    /// How far a radial background spreads, as a fraction of the key.
+    /// Shared by the deck's renderer and both on-screen previews so one
+    /// number keeps all three looking the same.
+    static let radialSpread: CGFloat = 0.62
+
+    /// What to paint behind this key on screen — the same background the
+    /// hardware is sent, so the grid is a preview rather than an
+    /// approximation.
+    var background: AnyShapeStyle {
+        guard let end = gradientEnd else { return AnyShapeStyle(color) }
+        let colors = [color, Color(nsColor: end)]
+        if gradientIsRadial {
+            // Elliptical rather than Radial: its radius is a FRACTION of the
+            // view, so one description serves the 70 pt grid cell and the
+            // 24 pt menu bar thumbnail without either being told its size.
+            return AnyShapeStyle(EllipticalGradient(
+                colors: colors, center: .center,
+                startRadiusFraction: 0, endRadiusFraction: Self.radialSpread))
+        }
+        return AnyShapeStyle(LinearGradient(colors: colors,
+                                            startPoint: .top, endPoint: .bottom))
     }
 
     var image: NSImage? {
@@ -44,7 +83,9 @@ struct DeckSettings: Codable {
 /// deck - a second instance would fight for the USB handle.
 @MainActor
 final class DeckController: ObservableObject {
-    static let shared = DeckController()
+    /// The app's instance, and the only one that watches the bus for the
+    /// deck being plugged in.
+    static let shared = DeckController(watchesForHotplug: true)
 
     @Published var keys: [KeyConfig] = Array(repeating: KeyConfig(), count: DeckLayout.keyCount)
     @Published var selected: Int = 0
@@ -57,7 +98,16 @@ final class DeckController: ObservableObject {
     @Published var primary: Color = Color(nsColor: NSColor(hex: "#00E0FF")!) { didSet { renderPattern() } }
     @Published var secondary: Color = Color(nsColor: NSColor(hex: "#12002E")!) { didSet { renderPattern() } }
     @Published var wallpaperPath: String? = nil
-    @Published var brightness: Double = 100 { didSet { device.setBrightness(Int(brightness)) } }
+    /// Persisted like everything else in `DeckSettings` — it was the one
+    /// field with nowhere calling `save()`, so a brightness change survived
+    /// only if some unrelated edit happened to write the file afterwards.
+    /// `save()` coalesces, which is what makes it safe to call from a slider.
+    @Published var brightness: Double = 100 {
+        didSet {
+            device.setBrightness(Int(brightness))
+            save()
+        }
+    }
 
     /// Trades key presses for smoother GIFs. Off by default, and the UI says
     /// what it costs.
@@ -122,7 +172,13 @@ final class DeckController: ObservableObject {
     /// True when the deck is open but has stopped accepting writes.
     @Published var stalled: Bool = false
 
-    init(storeURL: URL? = nil) {
+    /// True while a plug-in has been seen and the connect attempt it schedules
+    /// has not run yet.
+    private var reconnectPending = false
+
+    /// Off by default so a test never opens a HID manager: only the shared
+    /// instance the app runs on watches the bus.
+    init(storeURL: URL? = nil, watchesForHotplug: Bool = false) {
         self.storeURL = storeURL ?? Self.defaultStoreURL
         load()
         device.onKeyDown = { [weak self] index in
@@ -131,6 +187,48 @@ final class DeckController: ObservableObject {
         device.onHealthChange = { [weak self] healthy in
             Task { @MainActor in self?.healthChanged(healthy) }
         }
+        device.onDeviceAttached = { [weak self] in
+            Task { @MainActor in self?.deviceAttached() }
+        }
+        device.onDeviceRemoved = { [weak self] in
+            Task { @MainActor in self?.deviceRemoved() }
+        }
+        if watchesForHotplug { device.startWatching() }
+    }
+
+    // MARK: - Hotplug
+
+    /// A deck appeared. Both callbacks can arrive twice for one deck, so this
+    /// has to be idempotent.
+    private func deviceAttached() {
+        guard !connected, !reconnectPending else { return }
+        reconnectPending = true
+        status = "Deck detected — connecting…"
+        // Not immediately: the deck has only just enumerated, and the
+        // handshake is the one sequence that must not be sent to a device
+        // that is not ready for it. One delayed attempt also absorbs the
+        // duplicate callback.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.reconnectPending = false
+                guard !self.connected else { return }
+                self.connect()
+            }
+        }
+    }
+
+    /// The deck was unplugged. The device handle is already gone by the time
+    /// this runs — `D6Device` drops it without writing — so this only has to
+    /// bring the app's own state down with it.
+    private func deviceRemoved() {
+        guard connected || stalled else { return }
+        stopClock()
+        stopWidgetClock()
+        connected = false
+        stalled = false
+        lastSent.removeAll()
+        status = "Deck unplugged. It connects itself when you plug it back in."
     }
 
     private func healthChanged(_ healthy: Bool) {
@@ -141,7 +239,7 @@ final class DeckController: ObservableObject {
             // The deck stays enumerable and readable while its OUT endpoint is
             // stalled, so "connected" would be actively misleading here.
             stopClock()
-            status = "Deck stopped responding — unplug it, plug it back in, then press Connect"
+            status = "Deck stopped responding — unplug it and plug it back in"
         }
     }
 
@@ -167,7 +265,7 @@ final class DeckController: ObservableObject {
             widgetsChanged()
         } else {
             connected = false
-            status = "No deck found. Plug in the fifine D6 and press Connect."
+            status = "No deck found. Plug in the fifine D6 — it connects itself."
         }
     }
 
@@ -206,7 +304,7 @@ final class DeckController: ObservableObject {
             var payload: [Int: Data] = [:]
             for (index, cfg) in keys.enumerated() {
                 if gifs[index] != nil { continue }        // the clock drives GIF keys
-                if let jpeg = KeyImage.jpeg(color: cfg.nsColor, image: cfg.image, label: cfg.label) {
+                if let jpeg = KeyImage.jpeg(for: cfg) {
                     payload[index] = jpeg
                 }
             }
@@ -449,6 +547,44 @@ final class DeckController: ObservableObject {
         }
     }
 
+    /// Turns a gradient on with a second colour, or off with nil.
+    func setGradient(_ hex: String?, for index: Int) {
+        guard keys.indices.contains(index) else { return }
+        keys[index].gradientHex = hex
+        keyBackgroundChanged(index)
+    }
+
+    func setGradientStyle(_ style: String, for index: Int) {
+        guard keys.indices.contains(index) else { return }
+        keys[index].gradientStyle = style
+        keyBackgroundChanged(index)
+    }
+
+    /// A second colour that looks deliberate the moment the switch is
+    /// flipped: away from the base colour, towards black unless the base is
+    /// already dark, in which case there is nowhere to go but lighter.
+    func suggestedGradientEnd(for index: Int) -> String {
+        guard keys.indices.contains(index) else { return "#000000" }
+        let base = keys[index].nsColor.usingColorSpace(.deviceRGB) ?? .black
+        let towards: NSColor = base.brightnessComponent < 0.25 ? .white : .black
+        let amount: CGFloat = base.brightnessComponent < 0.25 ? 0.38 : 0.68
+        let blended = base.blended(withFraction: amount, of: towards) ?? base
+        return blended.hexString
+    }
+
+    private func keyBackgroundChanged(_ index: Int) {
+        save()
+        // A widget takes its tint from its anchor key, so recolouring one
+        // repaints the whole span - the same rule `setColor` follows.
+        if let cell = widgetCells[index], cell.isAnchor {
+            renderPattern()
+        } else if pattern == .none {
+            pushKey(index)
+        } else {
+            renderPattern()
+        }
+    }
+
     func setAction(_ action: KeyAction, for index: Int) {
         guard keys.indices.contains(index) else { return }
         keys[index].action = action
@@ -459,7 +595,7 @@ final class DeckController: ObservableObject {
         guard connected, pattern == .none, gifs[index] == nil,
               widgetCells[index] == nil, keys.indices.contains(index) else { return }
         let cfg = keys[index]
-        guard let jpeg = KeyImage.jpeg(color: cfg.nsColor, image: cfg.image, label: cfg.label)
+        guard let jpeg = KeyImage.jpeg(for: cfg)
         else { return }
         sendDiff([index: jpeg])
     }
@@ -467,7 +603,15 @@ final class DeckController: ObservableObject {
     func chooseImage(for index: Int) {
         guard let url = pickFile(types: [.png, .jpeg, .gif, .bmp, .tiff, .heic],
                                  message: "Choose an image for this key") else { return }
-        keys[index].imagePath = url.path
+        setImage(url.path, for: index)
+    }
+
+    /// Where a key's artwork actually gets set — the file picker and the
+    /// generator both land here, so a generated image is a key image in
+    /// exactly the same sense as one you chose.
+    func setImage(_ path: String, for index: Int) {
+        guard keys.indices.contains(index) else { return }
+        keys[index].imagePath = path
         keys[index].gifPath = nil
         gifs[index] = nil
         invalidateOverlay(index)
@@ -510,7 +654,14 @@ final class DeckController: ObservableObject {
         guard let url = pickFile(types: [.png, .jpeg, .bmp, .tiff, .heic],
                                  message: "Choose an image to spread across all 15 keys")
         else { return }
-        wallpaperPath = url.path
+        setWallpaper(url.path)
+    }
+
+    func setWallpaper(_ path: String) {
+        wallpaperPath = path
+        // Selecting the picture is the whole intent; making the user then
+        // find the pattern in a picker to see it would be a second step with
+        // only one sensible answer.
         pattern = .wallpaper
         save(); pushAll()
     }
@@ -779,9 +930,108 @@ final class DeckController: ObservableObject {
         action.perform()
     }
 
+    // MARK: - Generated artwork
+
+    /// One at a time. Not a technical limit — it is a paid call per press,
+    /// and a button that keeps accepting clicks while it works bills for
+    /// pictures nobody waited to see.
+    @Published private(set) var generating: Bool = false
+    @Published var generatorProblem: String? = nil
+
+    var canGenerate: Bool { WidgetCredentials.has(.fal) }
+
+    func generateImage(prompt: String, style: ImageGen.Style, for index: Int) {
+        generate(prompt: prompt, style: style, shape: .key) { [weak self] url in
+            self?.setImage(url.path, for: index)
+        }
+    }
+
+    func generateWallpaper(prompt: String, style: ImageGen.Style) {
+        generate(prompt: prompt, style: style, shape: .deck) { [weak self] url in
+            self?.setWallpaper(url.path)
+        }
+    }
+
+    private func generate(prompt: String, style: ImageGen.Style, shape: ImageGen.Shape,
+                          apply: @escaping (URL) -> Void) {
+        guard !generating else { return }
+        generating = true
+        generatorProblem = nil
+        // Inherits this actor, so `apply` runs on the main thread and only
+        // the network wait happens off it.
+        Task {
+            do {
+                let url = try await ImageGen.generate(prompt: prompt, style: style, shape: shape)
+                DeckLog.write("fifine: generated \(url.lastPathComponent)")
+                apply(url)
+            } catch {
+                let text = ImageGen.message(for: error)
+                DeckLog.write("fifine: image generation failed — \(text)")
+                generatorProblem = text
+            }
+            generating = false
+        }
+    }
+
+    // MARK: - Open at login
+
+    /// Mirrors `SMAppService`, which is the source of truth — see `LoginItem`
+    /// for why this is not in `settings.json`.
+    @Published private(set) var openAtLogin: Bool = LoginItem.isEnabled
+    @Published private(set) var loginItemProblem: String? = nil
+    var canOpenAtLogin: Bool { LoginItem.isSupported }
+
+    func setOpenAtLogin(_ enabled: Bool) {
+        loginItemProblem = LoginItem.set(enabled)
+        // Read back rather than assume it took: registration can be left
+        // pending the user's approval in System Settings, and a switch that
+        // says "on" while the system says "waiting" is a lie the user only
+        // discovers after the next reboot.
+        openAtLogin = LoginItem.isEnabled
+    }
+
     // MARK: - Persistence
 
+    /// How long an edit waits before it reaches the disk. Long enough that a
+    /// drag writes once at the end of it, short enough that it is over before
+    /// a hand gets back to the keyboard.
+    private static let saveDelay: TimeInterval = 0.4
+
+    /// Bumped by every request; a scheduled write that finds it changed has
+    /// been superseded and does nothing.
+    private var saveGeneration = 0
+
+    private static let saveQueue = DispatchQueue(label: "fifine.settings")
+
+    /// Coalesced, and the write itself happens off the main thread.
+    ///
+    /// Every editing path lands here, and some of them fire per tick of a
+    /// drag — the colour picker sends a change for every pixel the mouse
+    /// moves, and so does the brightness slider — so encoding the whole
+    /// layout and doing a temp-file-and-rename synchronously put the disk
+    /// inside the drag loop.
+    ///
+    /// The delay leaves a moment where an edit is not yet on disk, which is
+    /// what `saveNow()` is for; quitting and closing the window both go
+    /// through it.
     func save() {
+        saveGeneration += 1
+        let generation = saveGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.saveDelay) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.saveGeneration == generation else { return }
+                self.writeSettings(synchronously: false)
+            }
+        }
+    }
+
+    /// Writes immediately, and supersedes any pending coalesced write.
+    func saveNow() {
+        saveGeneration += 1
+        writeSettings(synchronously: true)
+    }
+
+    private func writeSettings(synchronously: Bool) {
         let settings = DeckSettings(
             keys: keys, pattern: pattern,
             primaryHex: NSColor(primary).hexString,
@@ -789,7 +1039,14 @@ final class DeckController: ObservableObject {
             wallpaperPath: wallpaperPath, brightness: brightness,
             smoothAnimation: smoothAnimation)
         guard let data = try? JSONEncoder().encode(settings) else { return }
-        try? data.write(to: storeURL, options: .atomic)
+        let url = storeURL
+        // Synchronously on the way out: handing the write to another queue as
+        // the process exits is handing it to a queue that will not run again.
+        if synchronously {
+            try? data.write(to: url, options: .atomic)
+        } else {
+            Self.saveQueue.async { try? data.write(to: url, options: .atomic) }
+        }
     }
 
     private func load() {

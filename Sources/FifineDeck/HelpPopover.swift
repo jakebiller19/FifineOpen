@@ -16,15 +16,15 @@ struct HelpPopover: View {
                 header
 
                 section("Keys do nothing when pressed", [
-                    "**Unplug the deck and plug it back in**, then press Connect. This is the only cure.",
+                    "**Unplug the deck and plug it back in.** This is the only cure. The app sees the replug and reconnects itself, so there is nothing to press.",
                     "The cause is the deck itself: when it is written to hard — which is what an animated GIF does — it stops reporting key presses entirely, and does not start again when the writing stops. Measured on this hardware: 87 presses registered while idle, zero during sustained image writes.",
                     "The app now paces its writes to avoid this. If you turned on **Smoother animation** in the Deck panel, turn it back off.",
                     "If a single key does nothing, check whether a widget covers it: a widget owns the presses of every key it paints.",
                 ])
 
                 section("The keys are blank or frozen", [
-                    "Press **Connect** to re-open the deck, then **Push all** to redraw every key.",
-                    "If writes have stalled the status turns red and says so. Same cure: replug.",
+                    "Press **Push all** to redraw every key, or **Connect** to re-open the deck.",
+                    "If writes have stalled the status turns red and says so. Same cure: replug — and the app comes back on its own once you do.",
                 ])
 
                 section("A key looks wrong", [

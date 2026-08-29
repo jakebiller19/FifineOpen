@@ -1,9 +1,29 @@
-# Never commit credentials: .env holds the Finnhub key (and whatever else the
-# scripts sharing it need). The app also reads
+# Never commit credentials. `.env` holds the Finnhub, fal and Spotify values
+# (and whatever else the scripts sharing it need). The app also reads
 # ~/Library/Application Support/FifineDeck/widgets.json, which is outside the
 # repo by design.
+#
+# `.env.*` covers .env.local and friends; the template is the one file here
+# that carries no values, so it is the one exception.
 .env
+.env.*
+!.env.template
+
+# The credential store and the deck layout, in case either is ever copied
+# into the repo to look at. widgets.json holds live tokens; settings.json
+# holds every key's Run-command string in plain text.
+widgets.json
+settings.json
+settings-backup.json
+
+# Generated key artwork lives in Application Support, but not if someone
+# points the app somewhere else.
+Generated/
 
 .build/
 FifineDeck.app/
+dist/
 .DS_Store
+
+# Machine-specific IDE state — the paths in it are this checkout's.
+.vscode/

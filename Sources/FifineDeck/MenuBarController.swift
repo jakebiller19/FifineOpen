@@ -85,6 +85,15 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
         menu.addItem(withTitleAndAction("Push All Keys", #selector(pushAll)))
         menu.addItem(.separator())
 
+        // Here as well as in the window: the app is usable with the window
+        // closed, and this is the setting that decides whether it is running
+        // at all after a reboot.
+        let login = withTitleAndAction("Open at Login", #selector(toggleOpenAtLogin))
+        login.state = deck.openAtLogin ? .on : .off
+        login.isEnabled = deck.canOpenAtLogin
+        menu.addItem(login)
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(title: "Quit fifine Deck",
                               action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -128,11 +137,16 @@ final class MenuBarController: NSObject, NSMenuDelegate, NSWindowDelegate {
 
     @objc private func pushAll() { deck.pushAll() }
 
+    @objc private func toggleOpenAtLogin() { deck.setOpenAtLogin(!deck.openAtLogin) }
+
     // MARK: - Window
 
     /// Hide rather than close, so the window can come back intact and the deck
     /// keeps running. Returning false stops AppKit destroying it.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // The window is where editing happens, so closing it is the natural
+        // point to flush the coalesced settings write.
+        deck.saveNow()
         sender.orderOut(nil)
         // Drop out of the Dock so it behaves like a menu bar app while hidden.
         NSApp.setActivationPolicy(.accessory)

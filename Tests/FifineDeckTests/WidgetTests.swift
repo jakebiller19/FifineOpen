@@ -1379,3 +1379,679 @@ final class WidgetEditorDraftTests: XCTestCase {
         XCTAssertEqual(deck.keys[0].widget?.columns, 3)
     }
 }
+
+/// Saving: what reaches the disk, and when.
+///
+/// Writes are coalesced now, so "did the edit persist" and "did it persist
+/// *yet*" are different questions and both are worth asking.
+@MainActor
+final class PersistenceTests: XCTestCase {
+
+    /// Never the real settings file — see `scratchDeck` above for the
+    /// regression that rule exists for.
+    private func scratch() throws -> (DeckController, URL) {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Persistence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("settings.json")
+        return (DeckController(storeURL: url), url)
+    }
+
+    private func stored(_ url: URL) throws -> DeckSettings {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(DeckSettings.self, from: data)
+    }
+
+    func testBrightnessIsPersisted() throws {
+        // It was the one field in DeckSettings with nothing calling save(),
+        // so it survived only when an unrelated edit wrote the file after it.
+        let (deck, url) = try scratch()
+        deck.brightness = 42
+        deck.saveNow()
+        XCTAssertEqual(try stored(url).brightness, 42)
+    }
+
+    func testBrightnessSurvivesAReload() throws {
+        let (deck, url) = try scratch()
+        deck.brightness = 17
+        deck.saveNow()
+        XCTAssertEqual(DeckController(storeURL: url).brightness, 17)
+    }
+
+    func testAnEditIsNotWrittenImmediately() throws {
+        // The point of the coalescing: a drag sends a change per pixel, and
+        // none of them may reach the disk on the spot.
+        let (deck, url) = try scratch()
+        deck.brightness = 55
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testACoalescedEditReachesTheDisk() throws {
+        let (deck, url) = try scratch()
+        deck.brightness = 66
+        let landed = expectation(description: "settings written")
+        // Comfortably past the debounce, so a slow machine does not fail it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { landed.fulfill() }
+        wait(for: [landed], timeout: 3)
+        XCTAssertEqual(try stored(url).brightness, 66)
+    }
+
+    func testTheLastEditOfABurstIsTheOneStored() throws {
+        // A drag ends where the mouse stopped, not somewhere in the middle.
+        let (deck, url) = try scratch()
+        for level in stride(from: 0, through: 100, by: 10) {
+            deck.brightness = Double(level)
+        }
+        deck.saveNow()
+        XCTAssertEqual(try stored(url).brightness, 100)
+    }
+
+    func testSaveNowSupersedesAPendingWrite() throws {
+        // Quitting flushes through saveNow(); the debounced write that was
+        // already scheduled must not then land on top with older state.
+        let (deck, url) = try scratch()
+        deck.brightness = 10        // schedules a coalesced write
+        deck.brightness = 90
+        deck.saveNow()
+        let settled = expectation(description: "any pending write has had its chance")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { settled.fulfill() }
+        wait(for: [settled], timeout: 3)
+        XCTAssertEqual(try stored(url).brightness, 90)
+    }
+}
+
+/// Opening at login.
+///
+/// Deliberately no test that turns it on: registering a login item is a real
+/// change to the machine running the tests, and unregistering it afterwards
+/// would not undo having asked the user's System Settings about it.
+final class LoginItemTests: XCTestCase {
+
+    func testABareBinaryCannotRegister() {
+        // The test bundle is not an .app, which is exactly the case that
+        // must fail with an explanation rather than an obscure OSStatus.
+        XCTAssertFalse(LoginItem.isSupported)
+        let problem = LoginItem.set(true)
+        XCTAssertNotNil(problem, "an unsupported host must say so")
+    }
+
+    func testAskingAnUnsupportedHostChangesNothing() {
+        LoginItem.set(true)
+        XCTAssertFalse(LoginItem.isEnabled)
+    }
+}
+
+/// The committed `.env.template`.
+///
+/// It is documentation that can go stale silently — a renamed key or a typo
+/// in it costs someone an afternoon — so it is checked against the code that
+/// actually reads the file.
+final class EnvTemplateTests: XCTestCase {
+
+    private var templateURL: URL {
+        // From this file, not the working directory: `swift test` runs from
+        // wherever it was invoked.
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()    // FifineDeckTests
+            .deletingLastPathComponent()    // Tests
+            .deletingLastPathComponent()    // repo root
+            .appendingPathComponent(".env.template")
+    }
+
+    private func template() throws -> String {
+        try String(contentsOf: templateURL, encoding: .utf8)
+    }
+
+    func testEveryKeyTheAppReadsIsDocumented() throws {
+        let text = try template()
+        for key in WidgetCredentials.Key.allCases {
+            for name in key.environmentNames {
+                XCTAssertTrue(text.contains(name),
+                              "\(name) is read by the app but absent from .env.template")
+            }
+        }
+        XCTAssertTrue(text.contains("FIFINE_DECK_ENV"))
+    }
+
+    func testEverySettingItDeclaresIsOneTheAppReads() throws {
+        let declared = Set(WidgetCredentials.parseDotenv(try template()).keys)
+        let known = Set(WidgetCredentials.Key.allCases.flatMap(\.environmentNames))
+        XCTAssertTrue(declared.isSubset(of: known),
+                      "unrecognised names in .env.template: \(declared.subtracting(known))")
+        XCTAssertFalse(declared.isEmpty, "the template declares nothing at all")
+    }
+
+    func testTheTemplateCarriesNoValues() throws {
+        // It is committed. A value in it is a leaked credential.
+        for (name, value) in WidgetCredentials.parseDotenv(try template()) {
+            XCTAssertTrue(value.isEmpty, "\(name) has a value in the committed template")
+        }
+    }
+
+    func testAnEmptyTemplateValueShadowsNothing() {
+        // Copying the template to .env and filling in one key must not make
+        // the app think the others are set to "".
+        let parsed = WidgetCredentials.parseDotenv("FINNHUB_KEY=\nSPOTIFY_CLIENT_ID=abc")
+        XCTAssertEqual(parsed["FINNHUB_KEY"], "")
+        XCTAssertEqual(parsed["SPOTIFY_CLIENT_ID"], "abc")
+    }
+
+    func testTheDocumentedRedirectURIIsTheOneTheLoginUses() throws {
+        // The single most common setup failure: Spotify matches the redirect
+        // literally, so the string in the docs has to be the string the
+        // listener registers, character for character.
+        XCTAssertTrue(try template().contains(SpotifyAuth.redirectURI()),
+                      "the template documents a redirect URI the login does not use")
+        XCTAssertEqual(SpotifyAuth.redirectURI(), "http://127.0.0.1:8888/callback")
+    }
+
+    func testTheScopesDocumentedAreTheScopesRequested() {
+        XCTAssertTrue(SpotifyAuth.scope.contains("user-read-playback-state"))
+        // Without this one a transport key draws its badge and then cannot
+        // act on it.
+        XCTAssertTrue(SpotifyAuth.scope.contains("user-modify-playback-state"))
+    }
+}
+
+/// Generated artwork. Nothing here spends a call — the shaping and the file
+/// naming are pure, which is why they are shaped that way.
+final class ImageGenTests: XCTestCase {
+
+    private func body(_ prompt: String, _ style: ImageGen.Style,
+                      _ shape: ImageGen.Shape) -> [String: Any] {
+        ImageGen.requestBody(prompt: prompt, style: style, shape: shape)
+    }
+
+    func testTheTypedPromptSurvives() {
+        let text = body("a red panda", .icon, .key)["prompt"] as? String
+        XCTAssertTrue(text?.hasPrefix("a red panda") == true,
+                      "what the user typed must lead the prompt")
+    }
+
+    func testAnIconIsDirectedToReadAtKeySize() {
+        // A key is 100x100. Without this direction the model returns a
+        // photograph, which at that size is mud.
+        let text = (body("an owl", .icon, .key)["prompt"] as? String) ?? ""
+        XCTAssertTrue(text.contains("flat vector icon"))
+        XCTAssertTrue(text.contains("high contrast"))
+        XCTAssertTrue(text.contains("no text"))
+    }
+
+    func testALogoIsAllowedItsLettering() {
+        let text = (body("ACME", .logo, .key)["prompt"] as? String) ?? ""
+        XCTAssertTrue(text.contains("lettering"))
+        XCTAssertFalse(text.contains("no lettering"), "a logo is the one case that wants text")
+    }
+
+    func testPromptExpansionIsOff() {
+        // Measured against this endpoint: expansion cost 46 s on a cold model
+        // against 0.3 s of inference, and it rewrites the prompt besides.
+        for style in ImageGen.Style.allCases {
+            XCTAssertEqual(body("x", style, .key)["expansion_model"] as? String, "None")
+        }
+    }
+
+    func testAKeyAsksForASquare() {
+        XCTAssertEqual(body("x", .icon, .key)["image_size"] as? String, "square")
+        XCTAssertEqual(body("x", .icon, .key)["output_format"] as? String, "png")
+    }
+
+    func testTheDeckAsksForTheCanvasAspect() {
+        // 5:3, the shape DeckCanvas slices into keys — asking for the right
+        // aspect beats cropping a wrong one.
+        let size = body("x", .art, .deck)["image_size"] as? [String: Int]
+        XCTAssertEqual(size?["width"], 1280)
+        XCTAssertEqual(size?["height"], 768)
+        let ratio = Double(size?["width"] ?? 0) / Double(size?["height"] ?? 1)
+        XCTAssertEqual(ratio, 500.0 / 300.0, accuracy: 0.001)
+        XCTAssertEqual(body("x", .art, .deck)["output_format"] as? String, "jpeg")
+    }
+
+    func testTheSafetyCheckerIsAlwaysAskedFor() {
+        XCTAssertEqual(body("x", .icon, .key)["enable_safety_checker"] as? Bool, true)
+        XCTAssertEqual(body("x", .icon, .key)["num_images"] as? Int, 1)
+    }
+
+    func testTheEndpointIsTheSynchronousOne() {
+        // Not queue.fal.run: this model finishes in under a second, so
+        // polling would cost more round trips than the work.
+        XCTAssertEqual(ImageGen.endpoint.absoluteString,
+                       "https://fal.run/ideogram/v4/instant")
+    }
+
+    // MARK: File naming
+
+    func testAFilenameIsReadable() {
+        let name = ImageGen.filename(prompt: "A Red Panda!", format: "png",
+                                     date: Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(name, "a-red-panda-1700000000.png")
+    }
+
+    func testAPromptCannotSteerThePath() {
+        // The prompt is user text that becomes a filename. Every separator
+        // has to be gone before it reaches the filesystem.
+        let name = ImageGen.filename(prompt: "../../etc/passwd", format: "png")
+        XCTAssertFalse(name.contains("/"))
+        XCTAssertFalse(name.contains(".."))
+        XCTAssertTrue(name.hasSuffix(".png"))
+    }
+
+    func testAnUnusableePromptStillNamesAFile() {
+        let name = ImageGen.filename(prompt: "🎧🎧🎧", format: "jpeg")
+        XCTAssertTrue(name.hasPrefix("image-"))
+        XCTAssertTrue(name.hasSuffix(".jpg"), "jpeg is written with the extension people expect")
+    }
+
+    func testALongPromptIsTrimmed() {
+        let name = ImageGen.filename(prompt: String(repeating: "wide ", count: 60), format: "png")
+        XCTAssertLessThan(name.count, 64)
+    }
+
+    func testTwoImagesFromOnePromptDoNotCollide() {
+        let first = ImageGen.filename(prompt: "owl", format: "png",
+                                      date: Date(timeIntervalSince1970: 100))
+        let second = ImageGen.filename(prompt: "owl", format: "png",
+                                       date: Date(timeIntervalSince1970: 200))
+        XCTAssertNotEqual(first, second)
+    }
+
+    func testImagesAreKeptWhereSettingsCanPointAtThem() {
+        // settings.json stores the path, so a temp directory would blank the
+        // key on the next reboot.
+        let path = ImageGen.directory.path
+        XCTAssertTrue(path.contains("Application Support/FifineDeck"))
+        XCTAssertFalse(path.hasPrefix(NSTemporaryDirectory()))
+    }
+
+    // MARK: Failures
+
+    func testEachFailureNamesItsFix() {
+        XCTAssertTrue(ImageGen.describe(status: 401, body: Data()).contains("FAL_KEY"))
+        XCTAssertTrue(ImageGen.describe(status: 402, body: Data()).contains("credit"))
+        XCTAssertTrue(ImageGen.describe(status: 429, body: Data()).contains("rate limited"))
+    }
+
+    func testTheServersOwnComplaintIsShown() {
+        let body = Data(#"{"detail":"prompt is required"}"#.utf8)
+        XCTAssertTrue(ImageGen.describe(status: 422, body: body).contains("prompt is required"))
+    }
+
+    func testAValidationListIsUnwrapped() {
+        // 422 answers with a list of field errors rather than a string.
+        let body = Data(#"{"detail":[{"msg":"image_size is invalid"}]}"#.utf8)
+        XCTAssertTrue(ImageGen.describe(status: 422, body: body).contains("image_size is invalid"))
+    }
+
+    func testAnUnreadableBodyStillSaysSomething() {
+        XCTAssertTrue(ImageGen.describe(status: 500, body: Data("<html>".utf8)).contains("500"))
+    }
+
+    func testNoKeyIsReportedBeforeAnyRequestIsMade() async throws {
+        // Only meaningful where the machine running the tests has no key —
+        // and `try?` here would swallow the skip and fire a real, paid
+        // request at fal.ai instead.
+        try XCTSkipIf(WidgetCredentials.has(.fal), "this machine has a FAL_KEY")
+        do {
+            _ = try await ImageGen.generate(prompt: "x", style: .icon, shape: .key)
+            XCTFail("generating without a key must throw")
+        } catch {
+            XCTAssertTrue(ImageGen.message(for: error).contains("FAL_KEY"))
+        }
+    }
+
+    /// The real thing, end to end — off by default because it costs money.
+    ///
+    ///     FIFINE_LIVE_TESTS=1 swift test --filter testAgainstTheRealAPI
+    func testAgainstTheRealAPI() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["FIFINE_LIVE_TESTS"] == "1",
+                          "live test: set FIFINE_LIVE_TESTS=1 to spend a call")
+        try XCTSkipUnless(WidgetCredentials.has(.fal), "no FAL_KEY available")
+
+        let url = try await ImageGen.generate(prompt: "a single white coffee cup",
+                                              style: .icon, shape: .key)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        let image = try XCTUnwrap(NSImage(contentsOf: url), "the saved file must be an image")
+        XCTAssertGreaterThanOrEqual(image.size.width, 256)
+        XCTAssertEqual(image.size.width, image.size.height, "a key image is square")
+    }
+}
+
+/// Re-framing a generated icon.
+///
+/// Synthetic images throughout: the point is that the geometry is
+/// deterministic, which is the whole reason framing is not left to the prompt.
+final class FramingTests: XCTestCase {
+
+    /// A `subject`-coloured rectangle on a `background`-coloured square.
+    private func png(side: Int, background: NSColor, subject: NSColor?,
+                     rect: NSRect?) throws -> Data {
+        let rep = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 32))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        background.setFill()
+        NSRect(x: 0, y: 0, width: side, height: side).fill()
+        if let subject, let rect { subject.setFill(); rect.fill() }
+        NSGraphicsContext.restoreGraphicsState()
+        return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+    }
+
+    /// Where the non-background pixels are, in fractions of the square.
+    private func subjectBounds(_ data: Data) throws -> (x0: Double, x1: Double,
+                                                        y0: Double, y1: Double) {
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        let ground = try XCTUnwrap(rep.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB))
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let far = abs(c.redComponent - ground.redComponent) > 0.15
+                    || abs(c.greenComponent - ground.greenComponent) > 0.15
+                    || abs(c.blueComponent - ground.blueComponent) > 0.15
+                guard far else { continue }
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        XCTAssertGreaterThanOrEqual(maxX, minX, "the framed image has no subject in it")
+        return (Double(minX) / Double(w), Double(maxX) / Double(w),
+                Double(minY) / Double(h), Double(maxY) / Double(h))
+    }
+
+    func testASubjectInACornerIsCentred() throws {
+        // The failure this exists for: the model puts the subject against an
+        // edge, and on a 100 px key that reads as a mistake.
+        let source = try png(side: 256, background: .black, subject: .white,
+                             rect: NSRect(x: 6, y: 6, width: 70, height: 70))
+        let framed = try XCTUnwrap(ImageGen.framed(source), "a cornered subject must be re-framed")
+        let box = try subjectBounds(framed)
+        XCTAssertEqual((box.x0 + box.x1) / 2, 0.5, accuracy: 0.03, "not horizontally centred")
+        XCTAssertEqual((box.y0 + box.y1) / 2, 0.5, accuracy: 0.03, "not vertically centred")
+    }
+
+    func testTheSubjectGetsAMarginOnEverySide() throws {
+        let source = try png(side: 256, background: .black, subject: .white,
+                             rect: NSRect(x: 0, y: 0, width: 200, height: 200))
+        let framed = try XCTUnwrap(ImageGen.framed(source))
+        let box = try subjectBounds(framed)
+        let margin = ImageGen.framingMargin - 0.02      // tolerance for resampling
+        XCTAssertGreaterThan(box.x0, margin)
+        XCTAssertGreaterThan(box.y0, margin)
+        XCTAssertLessThan(box.x1, 1 - margin)
+        XCTAssertLessThan(box.y1, 1 - margin)
+    }
+
+    func testAWideSubjectKeepsItsShape() throws {
+        // Centring must not stretch anything: a 3:1 banner stays 3:1.
+        let source = try png(side: 256, background: .black, subject: .white,
+                             rect: NSRect(x: 10, y: 100, width: 180, height: 60))
+        let framed = try XCTUnwrap(ImageGen.framed(source))
+        let box = try subjectBounds(framed)
+        let ratio = (box.x1 - box.x0) / (box.y1 - box.y0)
+        XCTAssertEqual(ratio, 3.0, accuracy: 0.35)
+    }
+
+    func testAnImageWithNoMarginIsLeftAlone() throws {
+        // Edge to edge in both directions: there is no background to measure
+        // against, so shrinking it would be a guess. Better to do nothing.
+        let source = try png(side: 256, background: .black, subject: .white,
+                             rect: NSRect(x: 0, y: 0, width: 256, height: 256))
+        XCTAssertNil(ImageGen.framed(source))
+    }
+
+    func testAnEmptyImageIsLeftAlone() throws {
+        let source = try png(side: 256, background: .black, subject: nil, rect: nil)
+        XCTAssertNil(ImageGen.framed(source))
+    }
+
+    func testTheBackgroundColourIsKept() throws {
+        // Re-framing paints new margin, and it has to be the colour the
+        // picture already had or the key gets a visible frame around it.
+        let ground = NSColor(red: 0.05, green: 0.07, blue: 0.20, alpha: 1)
+        let source = try png(side: 256, background: ground, subject: .white,
+                             rect: NSRect(x: 4, y: 4, width: 60, height: 60))
+        let framed = try XCTUnwrap(ImageGen.framed(source))
+
+        // Compared against the SOURCE read back the same way, not against the
+        // NSColor it was built from: both files decode through the same
+        // colour-space conversion, and comparing across that measures the
+        // conversion rather than the framing.
+        func corner(_ data: Data) throws -> NSColor {
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+            return try XCTUnwrap(rep.colorAt(x: 1, y: 1)?.usingColorSpace(.deviceRGB))
+        }
+        let before = try corner(source), after = try corner(framed)
+        XCTAssertEqual(after.redComponent, before.redComponent, accuracy: 0.02)
+        XCTAssertEqual(after.greenComponent, before.greenComponent, accuracy: 0.02)
+        XCTAssertEqual(after.blueComponent, before.blueComponent, accuracy: 0.02)
+    }
+
+    func testRubbishInIsNotACrash() throws {
+        XCTAssertNil(ImageGen.framed(Data("not an image".utf8)))
+        XCTAssertNil(ImageGen.framed(Data()))
+    }
+
+    func testArtIsNotReframed() {
+        // Filling the frame is the point of a deck background.
+        XCTAssertFalse(ImageGen.Style.art.framesSubject)
+        XCTAssertTrue(ImageGen.Style.icon.framesSubject)
+        XCTAssertTrue(ImageGen.Style.logo.framesSubject)
+    }
+}
+
+/// Per-key gradient backgrounds.
+final class KeyGradientTests: XCTestCase {
+
+    func testAKeyIsAFlatColourUntilToldOtherwise() {
+        let key = KeyConfig()
+        XCTAssertFalse(key.hasGradient)
+        XCTAssertNil(key.gradientEnd)
+    }
+
+    func testSettingsWrittenBeforeGradientsExistedStillLoad() throws {
+        // The whole reason the two fields are optional: a non-optional would
+        // throw out of the decoder and lose every key in the file.
+        let json = ##"{"colorHex":"#112233","label":"hi","action":{"none":{}}}"##
+        let key = try XCTUnwrap(try? JSONDecoder().decode(KeyConfig.self, from: Data(json.utf8)))
+        XCTAssertEqual(key.colorHex, "#112233")
+        XCTAssertFalse(key.hasGradient)
+    }
+
+    func testAGradientSurvivesARoundTrip() throws {
+        var key = KeyConfig()
+        key.gradientHex = "#FF00AA"
+        key.gradientStyle = "radial"
+        let data = try JSONEncoder().encode(key)
+        let back = try JSONDecoder().decode(KeyConfig.self, from: data)
+        XCTAssertEqual(back.gradientHex, "#FF00AA")
+        XCTAssertTrue(back.gradientIsRadial)
+    }
+
+    func testAnUnreadableSecondColourIsTreatedAsAbsent() {
+        // Not as black: a hand-edited file with a typo in it should give a
+        // flat key, not a key that fades into nothing.
+        var key = KeyConfig()
+        key.gradientHex = "not a colour"
+        XCTAssertNil(key.gradientEnd)
+        XCTAssertFalse(key.hasGradient)
+    }
+
+    func testAnUnknownStyleFallsBackToLinear() {
+        var key = KeyConfig()
+        key.gradientHex = "#FFFFFF"
+        key.gradientStyle = "spiral"
+        XCTAssertFalse(key.gradientIsRadial)
+    }
+
+    func testAGradientChangesWhatTheDeckIsSent() throws {
+        // The assertion that the gradient is actually drawn, rather than
+        // stored and forgotten.
+        var flat = KeyConfig()
+        flat.colorHex = "#203040"
+        var faded = flat
+        faded.gradientHex = "#A0C0FF"
+
+        let flatJPEG = try XCTUnwrap(KeyImage.jpeg(for: flat))
+        let fadedJPEG = try XCTUnwrap(KeyImage.jpeg(for: faded))
+        XCTAssertNotEqual(flatJPEG, fadedJPEG)
+
+        var radial = faded
+        radial.gradientStyle = "radial"
+        XCTAssertNotEqual(try XCTUnwrap(KeyImage.jpeg(for: radial)), fadedJPEG,
+                          "linear and radial must not render the same")
+    }
+
+    func testALinearGradientRunsTopToBottom() throws {
+        var key = KeyConfig()
+        key.colorHex = "#000000"
+        key.gradientHex = "#FFFFFF"
+        let data = try XCTUnwrap(KeyImage.jpeg(for: key))
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+        // The key image is rotated 180° on the way out, so the file's first
+        // row is the BOTTOM of the key the user looks at — which is where
+        // the light end belongs.
+        let top = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide / 2, y: 2)?
+            .usingColorSpace(.deviceRGB))
+        let bottom = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh - 3)?
+            .usingColorSpace(.deviceRGB))
+        XCTAssertNotEqual(top.brightnessComponent, bottom.brightnessComponent, accuracy: 0.001)
+        XCTAssertGreaterThan(abs(top.brightnessComponent - bottom.brightnessComponent), 0.5,
+                             "a black-to-white gradient must actually span the key")
+    }
+
+    func testARadialGradientIsBrightestInTheMiddle() throws {
+        var key = KeyConfig()
+        key.colorHex = "#FFFFFF"
+        key.gradientHex = "#000000"
+        key.gradientStyle = "radial"
+        let data = try XCTUnwrap(KeyImage.jpeg(for: key))
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+        let middle = try XCTUnwrap(rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?
+            .usingColorSpace(.deviceRGB))
+        let corner = try XCTUnwrap(rep.colorAt(x: 2, y: 2)?.usingColorSpace(.deviceRGB))
+        XCTAssertGreaterThan(middle.brightnessComponent, corner.brightnessComponent + 0.3)
+    }
+
+    @MainActor
+    func testTurningOnAGradientPicksAVisibleSecondColour() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Gradient-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let deck = DeckController(storeURL: directory.appendingPathComponent("settings.json"))
+
+        // A dark key has nowhere to fade but lighter, and a light key nowhere
+        // but darker. Either way the two ends must be tellable apart.
+        for hex in ["#0A0A12", "#F0C000"] {
+            deck.keys[0].colorHex = hex
+            let end = try XCTUnwrap(NSColor(hex: deck.suggestedGradientEnd(for: 0))?
+                .usingColorSpace(.deviceRGB))
+            let base = try XCTUnwrap(NSColor(hex: hex)?.usingColorSpace(.deviceRGB))
+            XCTAssertGreaterThan(abs(end.brightnessComponent - base.brightnessComponent), 0.15,
+                                 "\(hex) faded into something indistinguishable from itself")
+        }
+    }
+}
+
+/// Nothing this repository would publish may carry a credential.
+///
+/// The template test above covers `.env.template`. This one covers everything
+/// else, because the file a secret lands in by accident is never the file you
+/// were watching.
+final class RepositoryHygieneTests: XCTestCase {
+
+    private var root: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()    // FifineDeckTests
+            .deletingLastPathComponent()    // Tests
+            .deletingLastPathComponent()    // repo root
+    }
+
+    private func git(_ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = root
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        try XCTSkipUnless(process.terminationStatus == 0, "not a git checkout")
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Exactly the set `git commit -a` would publish: tracked, plus untracked
+    /// that nothing ignores. A file `.gitignore` covers is not this test's
+    /// business — that is what makes `.env` itself allowed to exist.
+    private func committableFiles() throws -> [String] {
+        try git(["ls-files", "-co", "--exclude-standard"])
+            .split(separator: "\n").map(String.init)
+    }
+
+    func testTheWorkingCopyHasFilesToCheck() throws {
+        XCTAssertGreaterThan(try committableFiles().count, 10)
+    }
+
+    func testTheEnvFileIsNotCommittable() throws {
+        let files = try committableFiles()
+        XCTAssertFalse(files.contains(".env"), ".env must never be committable")
+        XCTAssertTrue(files.contains(".env.template"), "the template is meant to ship")
+    }
+
+    func testNoCommittableFileAssignsACredential() throws {
+        // Every name the app reads, in `NAME=value` or `NAME: value` form,
+        // with something substantial after it.
+        let names = WidgetCredentials.Key.allCases.flatMap(\.environmentNames)
+        let pattern = try NSRegularExpression(
+            pattern: "(\(names.joined(separator: "|")))\\s*[=:]\\s*[\"']?([A-Za-z0-9_.:/+-]{8,})")
+
+        for file in try committableFiles() {
+            let url = root.appendingPathComponent(file)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let matches = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches {
+                guard let range = Range(match.range(at: 2), in: text) else { continue }
+                let value = String(text[range])
+                // Placeholders are the point of the template and the docs.
+                let allowed = ["deadbeef", "YOUR_API_KEY", "YOUR_FAL_KEY"]
+                XCTAssertTrue(allowed.contains(where: { value.hasPrefix($0) }),
+                              "\(file) looks like it carries a real credential")
+            }
+        }
+    }
+
+    func testNoCommittableFileCarriesAPrivateKey() throws {
+        // Assembled at run time rather than written out: this file is itself
+        // one of the files being scanned, and a literal PEM header in it
+        // would make the test fail on its own source.
+        let opening = "-----" + "BEGIN "
+        let markers = ["RSA PRIVATE KEY", "OPENSSH PRIVATE KEY", "PRIVATE KEY",
+                       "EC PRIVATE KEY", "PGP PRIVATE KEY BLOCK", "CERTIFICATE"]
+            .map { opening + $0 }
+
+        for file in try committableFiles() {
+            let url = root.appendingPathComponent(file)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            for marker in markers {
+                XCTAssertFalse(text.contains(marker),
+                               "\(file) contains \(marker.replacingOccurrences(of: opening, with: "a "))")
+            }
+        }
+    }
+
+    func testTheCredentialFilesAreAllIgnored() throws {
+        // Not just .env: widgets.json holds live tokens and settings.json
+        // holds every Run-command string in plain text.
+        for name in [".env", ".env.local", "widgets.json", "settings.json"] {
+            let status = try git(["check-ignore", "-q", name])
+            XCTAssertEqual(status, "", "unexpected output for \(name)")
+        }
+    }
+}
