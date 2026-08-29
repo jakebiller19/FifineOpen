@@ -259,6 +259,32 @@ What the key says when it cannot connect: `offline` (nothing answered — the
 machine is asleep, VLC is closed, the interface was never enabled, or a
 firewall ate it), `wrong password`, `no password`, `set the address`.
 
+### Now playing (Spotify or VLC)
+
+One key that is neither the Spotify key nor the VLC key, but **the music
+key**: it asks both and shows whichever is actually playing, and a press acts
+on whichever it is showing.
+
+Composed rather than reimplemented — it calls the two existing providers and
+hands the drawing and the press straight back to whichever won, so the faces,
+the album art and the transport are the same code the single-source widgets
+use. Set the VLC address the same way; Spotify needs nothing.
+
+Which one it shows:
+
+1. **Playing wins.** That is the question being asked, so a paused VLC never
+   outranks a playing Spotify.
+2. **Both playing → whichever started most recently.** Starting something is
+   how you say which one you meant.
+3. **Neither playing → whatever was already there keeps the key.** Otherwise
+   pausing VLC would silently turn it into a Spotify key showing last night's
+   album.
+4. Then whichever has a track at all; then `nothing playing`.
+
+The two are polled **concurrently**, so a sleeping media PC costs a timeout
+rather than delaying Spotify behind it. Only the styles *both* renderers
+understand are offered, and a test fails if that stops being true.
+
 ### Clock
 
 Digital, analog or a date face; `Automatic` picks the analog face for a square
@@ -580,6 +606,7 @@ Sources/FifineDeck/
   SpotifyWidget.swift   now-playing data (Apple Events / Web API) + faces
   SpotifyAuth.swift     one-off PKCE login on a loopback listener
   VLCWidget.swift       another machine's VLC, over its HTTP interface
+  NowPlayingWidget.swift  one key for whichever of the two is playing
   StocksWidget.swift    Finnhub quotes + ticker faces
 Tests/FifineDeckTests/  span layout, config validation, rendering
 Tools/make_icon.swift   draws the app icon -> Resources/AppIcon.icns

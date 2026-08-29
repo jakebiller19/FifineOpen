@@ -137,8 +137,14 @@ struct WidgetEditor: View {
             options = [("Scoreboard", preset(.sports, style: "score", 3, 1)),
                        ("One game", preset(.sports, style: "score", 1, 1)),
                        ("Block", preset(.sports, style: "score", 3, 2))]
+        case .nowPlaying:
+            options = [("Now playing", preset(.nowPlaying, style: "split", 4, 2)),
+                       ("Big art", preset(.nowPlaying, style: "art", 2, 2)),
+                       ("Transport bar", preset(.nowPlaying, style: "controls", 3, 1)),
+                       ("Play/pause key", preset(.nowPlaying, style: "button", 1, 1,
+                                                 press: "play_pause"))]
         case .vlc:
-            options = [("Now playing", preset(.vlc, style: "progress", 3, 2)),
+            options = [("Now playing", preset(.vlc, style: "split", 4, 2)),
                        ("Transport bar", preset(.vlc, style: "controls", 3, 1)),
                        ("Play/pause key", preset(.vlc, style: "button", 1, 1,
                                                  press: "play_pause")),
@@ -229,6 +235,7 @@ struct WidgetEditor: View {
         case .timer:    timerFields(config)
         case .calendar: intervalField(config)
         case .vlc:      vlcFields(config)
+        case .nowPlaying: vlcFields(config)
         }
     }
 

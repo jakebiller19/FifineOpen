@@ -2288,3 +2288,78 @@ extension VLCWidgetTests {
         XCTAssertFalse(state?.reachable ?? true, "nothing was contacted")
     }
 }
+
+/// One key, either player. The rules for which one it shows.
+final class NowPlayingTests: XCTestCase {
+
+    private func choose(spotify: Bool = false, spotifyTrack: Bool = false,
+                        vlc: Bool = false, vlcTrack: Bool = false,
+                        spotifyStarted: Date? = nil, vlcStarted: Date? = nil,
+                        previous: NowPlaying.Source = .none) -> NowPlaying.Source {
+        NowPlayingProvider.choose(spotifyPlaying: spotify, spotifyHasTrack: spotifyTrack || spotify,
+                                  vlcPlaying: vlc, vlcHasTrack: vlcTrack || vlc,
+                                  spotifyStarted: spotifyStarted, vlcStarted: vlcStarted,
+                                  previous: previous)
+    }
+
+    func testWhicheverIsActuallyPlayingWins() {
+        XCTAssertEqual(choose(spotify: true), .spotify)
+        XCTAssertEqual(choose(vlc: true), .vlc)
+    }
+
+    func testPlayingBeatsMerelyLoaded() {
+        // VLC paused on a track must not outrank Spotify actually playing.
+        XCTAssertEqual(choose(spotify: true, vlcTrack: true), .spotify)
+        XCTAssertEqual(choose(spotifyTrack: true, vlc: true), .vlc)
+    }
+
+    func testBothPlayingGoesToWhicheverStartedLast() {
+        // Starting something is how you say which one you meant.
+        let older = Date(timeIntervalSince1970: 1000)
+        let newer = Date(timeIntervalSince1970: 2000)
+        XCTAssertEqual(choose(spotify: true, vlc: true,
+                              spotifyStarted: older, vlcStarted: newer), .vlc)
+        XCTAssertEqual(choose(spotify: true, vlc: true,
+                              spotifyStarted: newer, vlcStarted: older), .spotify)
+    }
+
+    func testPausingDoesNotMakeTheKeyJumpToTheOtherPlayer() {
+        // The most annoying possible behaviour: pause VLC and the key
+        // silently becomes a Spotify key showing something from yesterday.
+        XCTAssertEqual(choose(spotifyTrack: true, vlcTrack: true, previous: .vlc), .vlc)
+        XCTAssertEqual(choose(spotifyTrack: true, vlcTrack: true, previous: .spotify), .spotify)
+    }
+
+    func testItFallsBackToWhicheverHasAnythingAtAll() {
+        XCTAssertEqual(choose(spotifyTrack: true), .spotify)
+        XCTAssertEqual(choose(vlcTrack: true), .vlc)
+    }
+
+    func testNothingAnywhereIsNotAGuess() {
+        XCTAssertEqual(choose(), .none)
+        XCTAssertEqual(choose(previous: .vlc), .none, "a remembered source with no track is not shown")
+    }
+
+    func testTheChosenSourceLeadsTheSignature() {
+        // Switching source must always repaint, even between two states that
+        // happen to describe similar text.
+        var a = NowPlaying(source: .spotify); a.spotify = SpotifyNowPlaying()
+        var b = NowPlaying(source: .vlc); b.vlc = VLCState()
+        XCTAssertNotEqual(a.signature, b.signature)
+    }
+
+    func testItOffersOnlyStylesBothRenderersUnderstand() {
+        let shared = Set(WidgetKind.nowPlaying.styles).subtracting(["auto"])
+        XCTAssertTrue(shared.isSubset(of: Set(WidgetKind.spotify.styles)),
+                      "a style Spotify cannot draw: \(shared.subtracting(Set(WidgetKind.spotify.styles)))")
+        XCTAssertTrue(shared.isSubset(of: Set(WidgetKind.vlc.styles)),
+                      "a style VLC cannot draw: \(shared.subtracting(Set(WidgetKind.vlc.styles)))")
+    }
+
+    func testATransportBarStillGivesEachKeyItsOwnButton() {
+        var config = WidgetConfig(kind: .nowPlaying)
+        config.style = "controls"
+        let cell = WidgetCell(anchor: 0, config: config, dx: 2, dy: 0, columns: 3, rows: 1)
+        XCTAssertEqual(NowPlayingProvider().action(for: config, cell: cell), "next")
+    }
+}

@@ -25,6 +25,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     case timer
     case calendar
     case vlc
+    case nowPlaying
 
     var id: String { rawValue }
 
@@ -39,6 +40,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .timer:    return "Timer"
         case .calendar: return "Next calendar event"
         case .vlc:      return "VLC on the network"
+        case .nowPlaying: return "Now playing (Spotify or VLC)"
         }
     }
 
@@ -55,6 +57,8 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .timer:    return ["auto", "ring", "digits"]
         case .calendar: return ["auto", "next", "agenda"]
         case .vlc:      return ["auto", "art", "split", "progress", "text", "button", "controls"]
+        // The styles BOTH renderers understand, since either may draw.
+        case .nowPlaying: return ["auto", "art", "split", "text", "button", "controls"]
         }
     }
 
@@ -62,7 +66,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     /// actions. A "controls" widget IS the transport bar.
     var stylesWithOwnActions: [String] {
         switch self {
-        case .spotify, .vlc: return ["controls"]
+        case .spotify, .vlc, .nowPlaying: return ["controls"]
         default:             return []
         }
     }
@@ -78,6 +82,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .timer:    return ["start_pause", "reset", "none"]
         case .calendar: return ["open", "none"]
         case .vlc:      return ["play_pause", "next", "previous", "stop", "none"]
+        case .nowPlaying: return ["play_pause", "next", "previous", "none"]
         }
     }
 
@@ -94,6 +99,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .timer:    return 1
         case .calendar: return 60
         case .vlc:      return 2
+        case .nowPlaying: return 3
         }
     }
 
@@ -113,6 +119,8 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .calendar: return 15
         // A machine on your own LAN, answering a tiny JSON document.
         case .vlc:      return 1
+        // Two services per tick, one of them Spotify's.
+        case .nowPlaying: return 2
         }
     }
 
@@ -130,7 +138,8 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         // VLC reuses `place` for the address of the machine running it: it is
         // the same thing the field already is - one free-text target - and a
         // field per kind would be a field per kind.
-        case .weather, .sports, .vlc: return true
+        // nowPlaying needs the VLC address too - it asks both.
+        case .weather, .sports, .vlc, .nowPlaying: return true
         default: return false
         }
     }
@@ -140,7 +149,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     var isLocal: Bool {
         switch self {
         case .clock, .system, .timer, .calendar: return true
-        case .spotify, .stocks, .weather, .sports, .vlc: return false
+        case .spotify, .stocks, .weather, .sports, .vlc, .nowPlaying: return false
         }
     }
 }
@@ -229,7 +238,7 @@ struct WidgetConfig: Codable, Equatable, Hashable {
         out.interval = min(max(out.interval, kind.minimumInterval), Self.maximumInterval)
         out.rotate = out.rotate <= 0 ? 0 : min(max(out.rotate, 2), Self.maximumInterval)
         out.minutes = min(max(out.minutes, 1), 600)
-        if kind == .spotify {
+        if kind == .spotify || kind == .nowPlaying {
             if !["auto", "local", "web"].contains(out.source) { out.source = "auto" }
         } else {
             out.source = "auto"
@@ -413,6 +422,7 @@ enum WidgetRegistry {
         .timer: TimerProvider(),
         .calendar: CalendarProvider(),
         .vlc: VLCProvider(),
+        .nowPlaying: NowPlayingProvider(),
     ]
 
     static func provider(for kind: WidgetKind) -> any WidgetProviding {
